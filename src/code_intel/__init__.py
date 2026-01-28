@@ -1,6 +1,6 @@
 """Code-intel: Code graph intelligence for AI assistants."""
 
-from code_intel.client import CodeIntelClient
+from code_intel.client import CodeIntelClient, IndexResult, ProgressCallback, RepoStats
 from code_intel.graph.schema import (
     CodeGraph,
     EdgeKind,
@@ -25,6 +25,9 @@ __version__ = "0.1.0"
 __all__ = [
     # Client
     "CodeIntelClient",
+    "IndexResult",
+    "ProgressCallback",
+    "RepoStats",
     # Graph
     "CodeGraph",
     "EdgeKind",
