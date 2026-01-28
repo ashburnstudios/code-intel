@@ -8,12 +8,14 @@ from code_intel.graph.schema import (
     Location,
     NodeKind,
 )
+from code_intel.graph.storage import GraphStorage
 
 __all__ = [
     "CodeGraph",
     "EdgeKind",
     "GraphEdge",
     "GraphNode",
+    "GraphStorage",
     "Location",
     "NodeKind",
 ]
