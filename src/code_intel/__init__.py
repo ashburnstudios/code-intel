@@ -10,18 +10,36 @@ from code_intel.graph.schema import (
     NodeKind,
 )
 from code_intel.graph.storage import GraphStorage
-from code_intel.parser.base import BaseParser
+from code_intel.parser.base import BaseParser, ParsedEdge, ParsedNode, ParseResult
+from code_intel.parser.registry import (
+    ParserRegistry,
+    get_global_registry,
+    get_parser,
+    get_parser_for_file,
+    register_parser,
+)
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "BaseParser",
-    "CodeGraph",
+    # Client
     "CodeIntelClient",
+    # Graph
+    "CodeGraph",
     "EdgeKind",
     "GraphEdge",
     "GraphNode",
     "GraphStorage",
     "Location",
     "NodeKind",
+    # Parser
+    "BaseParser",
+    "ParsedEdge",
+    "ParsedNode",
+    "ParseResult",
+    "ParserRegistry",
+    "get_global_registry",
+    "get_parser",
+    "get_parser_for_file",
+    "register_parser",
 ]
