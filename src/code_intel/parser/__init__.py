@@ -36,6 +36,20 @@ def get_csharp_parser():
     return CSharpParser()
 
 
+def get_xaml_parser():
+    """Get the XAML parser instance.
+
+    Returns:
+        XamlParser instance.
+
+    Note:
+        Unlike tree-sitter based parsers, XamlParser uses Python's
+        xml.etree.ElementTree since XAML is well-formed XML.
+    """
+    from code_intel.parser.xaml import XamlParser
+    return XamlParser()
+
+
 __all__ = [
     # Base classes and dataclasses
     "BaseParser",
@@ -51,4 +65,5 @@ __all__ = [
     # Parser factory functions
     "get_python_parser",
     "get_csharp_parser",
+    "get_xaml_parser",
 ]
