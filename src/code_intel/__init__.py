@@ -9,6 +9,7 @@ from code_intel.graph.schema import (
     Location,
     NodeKind,
 )
+from code_intel.graph.storage import GraphStorage
 from code_intel.parser.base import BaseParser
 
 __version__ = "0.1.0"
@@ -20,6 +21,7 @@ __all__ = [
     "EdgeKind",
     "GraphEdge",
     "GraphNode",
+    "GraphStorage",
     "Location",
     "NodeKind",
 ]

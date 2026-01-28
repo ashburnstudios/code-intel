@@ -148,9 +148,13 @@ def test_top_level_exports():
         EdgeKind,
         GraphEdge,
         GraphNode,
+        GraphStorage,
         Location,
         NodeKind,
         __version__,
     )
 
     assert __version__ == "0.1.0"
+    # Verify GraphStorage can be instantiated
+    storage = GraphStorage()
+    assert storage is not None
