@@ -23,6 +23,19 @@ def get_python_parser():
     return PythonParser()
 
 
+def get_csharp_parser():
+    """Get the C# parser instance.
+
+    Returns:
+        CSharpParser instance.
+
+    Raises:
+        ImportError: If tree-sitter-c-sharp is not installed.
+    """
+    from code_intel.parser.csharp import CSharpParser
+    return CSharpParser()
+
+
 __all__ = [
     # Base classes and dataclasses
     "BaseParser",
@@ -37,4 +50,5 @@ __all__ = [
     "register_parser",
     # Parser factory functions
     "get_python_parser",
+    "get_csharp_parser",
 ]
