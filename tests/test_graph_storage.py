@@ -496,3 +496,515 @@ class TestFilePersistence:
         retrieved = storage2.get_node("persist:test:1")
         assert retrieved is not None
         assert retrieved.name == "test"
+
+
+class TestQueryMethods:
+    """Tests for graph query methods."""
+
+    @pytest.fixture
+    def query_graph(self, storage: GraphStorage) -> GraphStorage:
+        """Create a graph with call relationships for testing queries."""
+        # Create nodes: module -> class -> methods, plus helper functions
+        nodes = [
+            GraphNode(
+                id="mod:main:1",
+                name="main",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="src/main.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=100,
+                    end_column=0,
+                ),
+                qualified_name="main",
+            ),
+            GraphNode(
+                id="func:process_data:10",
+                name="process_data",
+                kind=NodeKind.FUNCTION,
+                location=Location(
+                    file_path="src/main.py",
+                    start_line=10,
+                    start_column=0,
+                    end_line=20,
+                    end_column=0,
+                ),
+                qualified_name="main.process_data",
+                signature="(data: list) -> dict",
+            ),
+            GraphNode(
+                id="func:validate:25",
+                name="validate",
+                kind=NodeKind.FUNCTION,
+                location=Location(
+                    file_path="src/main.py",
+                    start_line=25,
+                    start_column=0,
+                    end_line=35,
+                    end_column=0,
+                ),
+                qualified_name="main.validate",
+                signature="(item: Any) -> bool",
+            ),
+            GraphNode(
+                id="func:helper:40",
+                name="helper",
+                kind=NodeKind.FUNCTION,
+                location=Location(
+                    file_path="src/utils.py",
+                    start_line=40,
+                    start_column=0,
+                    end_line=50,
+                    end_column=0,
+                ),
+                qualified_name="utils.helper",
+            ),
+            GraphNode(
+                id="func:transform:55",
+                name="transform",
+                kind=NodeKind.FUNCTION,
+                location=Location(
+                    file_path="src/utils.py",
+                    start_line=55,
+                    start_column=0,
+                    end_line=65,
+                    end_column=0,
+                ),
+                qualified_name="utils.transform",
+            ),
+            GraphNode(
+                id="class:DataProcessor:70",
+                name="DataProcessor",
+                kind=NodeKind.CLASS,
+                location=Location(
+                    file_path="src/processor.py",
+                    start_line=70,
+                    start_column=0,
+                    end_line=120,
+                    end_column=0,
+                ),
+                qualified_name="processor.DataProcessor",
+            ),
+        ]
+
+        for node in nodes:
+            storage.create_node(node, repo_path="/project")
+
+        # Create edges for call relationships:
+        # process_data calls validate, helper, transform
+        # validate calls helper
+        # DataProcessor (referenced, not called)
+        edges = [
+            GraphEdge(
+                source_id="func:process_data:10",
+                target_id="func:validate:25",
+                kind=EdgeKind.CALLS,
+            ),
+            GraphEdge(
+                source_id="func:process_data:10",
+                target_id="func:helper:40",
+                kind=EdgeKind.CALLS,
+            ),
+            GraphEdge(
+                source_id="func:process_data:10",
+                target_id="func:transform:55",
+                kind=EdgeKind.CALLS,
+            ),
+            GraphEdge(
+                source_id="func:validate:25",
+                target_id="func:helper:40",
+                kind=EdgeKind.CALLS,
+            ),
+            # process_data instantiates DataProcessor
+            GraphEdge(
+                source_id="func:process_data:10",
+                target_id="class:DataProcessor:70",
+                kind=EdgeKind.INSTANTIATES,
+            ),
+            # validate references DataProcessor (type annotation)
+            GraphEdge(
+                source_id="func:validate:25",
+                target_id="class:DataProcessor:70",
+                kind=EdgeKind.REFERENCES,
+            ),
+        ]
+
+        for edge in edges:
+            storage.create_edge(edge)
+
+        return storage
+
+    # ========================================================================
+    # find_callers tests
+    # ========================================================================
+
+    def test_find_callers_basic(self, query_graph: GraphStorage) -> None:
+        """Test finding callers of a function."""
+        callers = query_graph.find_callers("helper", "/project")
+
+        assert len(callers) == 2
+        caller_names = {c.name for c in callers}
+        assert caller_names == {"process_data", "validate"}
+
+    def test_find_callers_single(self, query_graph: GraphStorage) -> None:
+        """Test finding callers when there's only one."""
+        callers = query_graph.find_callers("validate", "/project")
+
+        assert len(callers) == 1
+        assert callers[0].name == "process_data"
+
+    def test_find_callers_none(self, query_graph: GraphStorage) -> None:
+        """Test finding callers when there are none."""
+        callers = query_graph.find_callers("process_data", "/project")
+        assert len(callers) == 0
+
+    def test_find_callers_nonexistent_symbol(self, query_graph: GraphStorage) -> None:
+        """Test finding callers of a non-existent symbol."""
+        callers = query_graph.find_callers("nonexistent", "/project")
+        assert len(callers) == 0
+
+    def test_find_callers_wrong_repo(self, query_graph: GraphStorage) -> None:
+        """Test that repo_path scopes the search."""
+        callers = query_graph.find_callers("helper", "/other_project")
+        assert len(callers) == 0
+
+    def test_find_callers_pagination(self, query_graph: GraphStorage) -> None:
+        """Test pagination with limit and offset."""
+        # helper has 2 callers
+        callers_page1 = query_graph.find_callers("helper", "/project", limit=1)
+        callers_page2 = query_graph.find_callers("helper", "/project", limit=1, offset=1)
+
+        assert len(callers_page1) == 1
+        assert len(callers_page2) == 1
+        assert callers_page1[0].name != callers_page2[0].name
+
+    def test_find_callers_offset_only(self, query_graph: GraphStorage) -> None:
+        """Test pagination with offset only."""
+        # helper has 2 callers, skip the first
+        callers = query_graph.find_callers("helper", "/project", offset=1)
+        assert len(callers) == 1
+
+    # ========================================================================
+    # find_callees tests
+    # ========================================================================
+
+    def test_find_callees_multiple(self, query_graph: GraphStorage) -> None:
+        """Test finding callees of a function with multiple calls."""
+        callees = query_graph.find_callees("process_data", "/project")
+
+        assert len(callees) == 3
+        callee_names = {c.name for c in callees}
+        assert callee_names == {"validate", "helper", "transform"}
+
+    def test_find_callees_single(self, query_graph: GraphStorage) -> None:
+        """Test finding callees when there's only one."""
+        callees = query_graph.find_callees("validate", "/project")
+
+        assert len(callees) == 1
+        assert callees[0].name == "helper"
+
+    def test_find_callees_none(self, query_graph: GraphStorage) -> None:
+        """Test finding callees when function calls nothing."""
+        callees = query_graph.find_callees("helper", "/project")
+        assert len(callees) == 0
+
+    def test_find_callees_pagination(self, query_graph: GraphStorage) -> None:
+        """Test callees pagination."""
+        # process_data calls 3 functions
+        callees_page1 = query_graph.find_callees("process_data", "/project", limit=2)
+        callees_page2 = query_graph.find_callees(
+            "process_data", "/project", limit=2, offset=2
+        )
+
+        assert len(callees_page1) == 2
+        assert len(callees_page2) == 1
+
+    # ========================================================================
+    # find_references tests
+    # ========================================================================
+
+    def test_find_references_includes_calls(self, query_graph: GraphStorage) -> None:
+        """Test that find_references includes call relationships."""
+        refs = query_graph.find_references("helper", "/project")
+
+        assert len(refs) == 2
+        ref_names = {r.name for r in refs}
+        assert ref_names == {"process_data", "validate"}
+
+    def test_find_references_includes_instantiates(
+        self, query_graph: GraphStorage
+    ) -> None:
+        """Test that find_references includes instantiation relationships."""
+        refs = query_graph.find_references("DataProcessor", "/project")
+
+        assert len(refs) == 2
+        ref_names = {r.name for r in refs}
+        # process_data instantiates it, validate references it
+        assert ref_names == {"process_data", "validate"}
+
+    def test_find_references_broader_than_callers(
+        self, query_graph: GraphStorage
+    ) -> None:
+        """Test that find_references is broader than find_callers."""
+        # DataProcessor is instantiated and referenced, but not "called"
+        callers = query_graph.find_callers("DataProcessor", "/project")
+        refs = query_graph.find_references("DataProcessor", "/project")
+
+        # Callers only finds CALLS edges
+        assert len(callers) == 0
+        # References finds INSTANTIATES and REFERENCES edges
+        assert len(refs) == 2
+
+    def test_find_references_pagination(self, query_graph: GraphStorage) -> None:
+        """Test references pagination."""
+        refs_page1 = query_graph.find_references("helper", "/project", limit=1)
+        refs_page2 = query_graph.find_references("helper", "/project", limit=1, offset=1)
+
+        assert len(refs_page1) == 1
+        assert len(refs_page2) == 1
+        assert refs_page1[0].name != refs_page2[0].name
+
+    # ========================================================================
+    # get_symbol_info tests
+    # ========================================================================
+
+    def test_get_symbol_info_basic(self, query_graph: GraphStorage) -> None:
+        """Test getting symbol info by name."""
+        info = query_graph.get_symbol_info("process_data", "/project")
+
+        assert info is not None
+        assert info.name == "process_data"
+        assert info.kind == NodeKind.FUNCTION
+        assert info.qualified_name == "main.process_data"
+        assert info.signature == "(data: list) -> dict"
+
+    def test_get_symbol_info_not_found(self, query_graph: GraphStorage) -> None:
+        """Test get_symbol_info returns None for non-existent symbol."""
+        info = query_graph.get_symbol_info("nonexistent", "/project")
+        assert info is None
+
+    def test_get_symbol_info_wrong_repo(self, query_graph: GraphStorage) -> None:
+        """Test that repo_path scopes the search."""
+        info = query_graph.get_symbol_info("process_data", "/other_project")
+        assert info is None
+
+    def test_get_symbol_info_with_qualified_name(
+        self, query_graph: GraphStorage
+    ) -> None:
+        """Test disambiguation by qualified name."""
+        # Create a second 'helper' in a different module
+        storage = query_graph
+        second_helper = GraphNode(
+            id="func:helper2:100",
+            name="helper",
+            kind=NodeKind.FUNCTION,
+            location=Location(
+                file_path="src/other.py",
+                start_line=100,
+                start_column=0,
+                end_line=110,
+                end_column=0,
+            ),
+            qualified_name="other.helper",
+        )
+        storage.create_node(second_helper, repo_path="/project")
+
+        # Get by qualified name
+        info = storage.get_symbol_info(
+            "helper", "/project", qualified_name="utils.helper"
+        )
+
+        assert info is not None
+        assert info.qualified_name == "utils.helper"
+
+    def test_get_symbol_info_with_node_type(self, query_graph: GraphStorage) -> None:
+        """Test disambiguation by node type."""
+        info = query_graph.get_symbol_info(
+            "DataProcessor", "/project", node_type=NodeKind.CLASS
+        )
+
+        assert info is not None
+        assert info.kind == NodeKind.CLASS
+
+        # Try with wrong type
+        info = query_graph.get_symbol_info(
+            "DataProcessor", "/project", node_type=NodeKind.FUNCTION
+        )
+        assert info is None
+
+
+class TestImportGraph:
+    """Tests for get_import_graph method."""
+
+    @pytest.fixture
+    def import_graph(self, storage: GraphStorage) -> GraphStorage:
+        """Create a graph with import relationships for testing."""
+        # File structure:
+        # main.py imports utils.py
+        # utils.py imports helpers.py
+        # helpers.py imports nothing
+        nodes = [
+            GraphNode(
+                id="mod:main:1",
+                name="main",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="src/main.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=50,
+                    end_column=0,
+                ),
+            ),
+            GraphNode(
+                id="mod:utils:1",
+                name="utils",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="src/utils.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=30,
+                    end_column=0,
+                ),
+            ),
+            GraphNode(
+                id="mod:helpers:1",
+                name="helpers",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="src/helpers.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=20,
+                    end_column=0,
+                ),
+            ),
+            GraphNode(
+                id="mod:unrelated:1",
+                name="unrelated",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="src/unrelated.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=10,
+                    end_column=0,
+                ),
+            ),
+        ]
+
+        for node in nodes:
+            storage.create_node(node, repo_path="/project")
+
+        # Import edges: main -> utils -> helpers
+        edges = [
+            GraphEdge(
+                source_id="mod:main:1",
+                target_id="mod:utils:1",
+                kind=EdgeKind.IMPORTS,
+            ),
+            GraphEdge(
+                source_id="mod:utils:1",
+                target_id="mod:helpers:1",
+                kind=EdgeKind.IMPORTS,
+            ),
+        ]
+
+        for edge in edges:
+            storage.create_edge(edge)
+
+        return storage
+
+    def test_get_import_graph_depth_1(self, import_graph: GraphStorage) -> None:
+        """Test getting direct imports only."""
+        edges = import_graph.get_import_graph("src/main.py", "/project", depth=1)
+
+        assert len(edges) == 1
+        assert edges[0].target_id == "mod:utils:1"
+
+    def test_get_import_graph_depth_2(self, import_graph: GraphStorage) -> None:
+        """Test getting transitive imports."""
+        edges = import_graph.get_import_graph("src/main.py", "/project", depth=2)
+
+        assert len(edges) == 2
+        target_ids = {e.target_id for e in edges}
+        assert target_ids == {"mod:utils:1", "mod:helpers:1"}
+
+    def test_get_import_graph_no_imports(self, import_graph: GraphStorage) -> None:
+        """Test file with no imports."""
+        edges = import_graph.get_import_graph("src/helpers.py", "/project", depth=1)
+        assert len(edges) == 0
+
+    def test_get_import_graph_depth_zero(self, import_graph: GraphStorage) -> None:
+        """Test depth 0 returns empty list."""
+        edges = import_graph.get_import_graph("src/main.py", "/project", depth=0)
+        assert len(edges) == 0
+
+    def test_get_import_graph_nonexistent_file(
+        self, import_graph: GraphStorage
+    ) -> None:
+        """Test non-existent file returns empty list."""
+        edges = import_graph.get_import_graph("nonexistent.py", "/project", depth=1)
+        assert len(edges) == 0
+
+    def test_get_import_graph_handles_cycles(self, storage: GraphStorage) -> None:
+        """Test that import cycles don't cause infinite loops."""
+        # Create a cycle: a -> b -> c -> a
+        nodes = [
+            GraphNode(
+                id="mod:a:1",
+                name="a",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="a.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=10,
+                    end_column=0,
+                ),
+            ),
+            GraphNode(
+                id="mod:b:1",
+                name="b",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="b.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=10,
+                    end_column=0,
+                ),
+            ),
+            GraphNode(
+                id="mod:c:1",
+                name="c",
+                kind=NodeKind.MODULE,
+                location=Location(
+                    file_path="c.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=10,
+                    end_column=0,
+                ),
+            ),
+        ]
+
+        for node in nodes:
+            storage.create_node(node, repo_path="/project")
+
+        edges = [
+            GraphEdge(source_id="mod:a:1", target_id="mod:b:1", kind=EdgeKind.IMPORTS),
+            GraphEdge(source_id="mod:b:1", target_id="mod:c:1", kind=EdgeKind.IMPORTS),
+            GraphEdge(source_id="mod:c:1", target_id="mod:a:1", kind=EdgeKind.IMPORTS),
+        ]
+
+        for edge in edges:
+            storage.create_edge(edge)
+
+        # Should complete without infinite loop and return all edges
+        result_edges = storage.get_import_graph("a.py", "/project", depth=10)
+
+        # Should have all 3 edges (a->b, b->c, c->a)
+        assert len(result_edges) == 3
