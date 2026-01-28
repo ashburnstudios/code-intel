@@ -3,6 +3,16 @@
 import pytest
 
 
+def _check_tree_sitter_available():
+    """Check if tree-sitter and tree-sitter-python are available."""
+    try:
+        from tree_sitter import Parser
+        import tree_sitter_python
+        return True
+    except ImportError:
+        return False
+
+
 def _get_python_parser():
     """Helper to create a Python parser with proper Language wrapping."""
     from tree_sitter import Language, Parser
@@ -18,6 +28,10 @@ def _get_python_parser():
     return Parser(language)
 
 
+@pytest.mark.skipif(
+    not _check_tree_sitter_available(),
+    reason="tree-sitter or tree-sitter-python not installed"
+)
 def test_tree_sitter_python_parsing():
     """Verify tree-sitter can load Python grammar and parse code."""
     parser = _get_python_parser()
@@ -61,6 +75,10 @@ class Greeter:
     assert not tree.root_node.has_error
 
 
+@pytest.mark.skipif(
+    not _check_tree_sitter_available(),
+    reason="tree-sitter or tree-sitter-python not installed"
+)
 def test_tree_sitter_extracts_function_name():
     """Verify we can extract function names from the AST."""
     parser = _get_python_parser()
@@ -86,6 +104,10 @@ def test_tree_sitter_extracts_function_name():
     assert name_text == "my_function"
 
 
+@pytest.mark.skipif(
+    not _check_tree_sitter_available(),
+    reason="tree-sitter or tree-sitter-python not installed"
+)
 def test_tree_sitter_handles_syntax_errors():
     """Verify tree-sitter handles syntax errors gracefully."""
     parser = _get_python_parser()
