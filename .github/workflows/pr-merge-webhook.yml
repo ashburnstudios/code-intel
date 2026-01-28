@@ -34,6 +34,7 @@ jobs:
         if: steps.extract.outputs.has_issue == 'true'
         env:
           WEBHOOK_URL: ${{ vars.FINALIZE_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
           # Use env vars to safely pass values that may contain special characters
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
@@ -66,10 +67,20 @@ jobs:
 
           # Send webhook (fail silently if URL not configured)
           if [ -n "$WEBHOOK_URL" ]; then
-            curl -s -X POST "$WEBHOOK_URL" \
-              -H "Content-Type: application/json" \
-              -d "$PAYLOAD" \
-              --max-time 30 || echo "Webhook delivery failed (non-fatal)"
+            if [ -n "$WEBHOOK_SECRET" ]; then
+              # Send with auth header for n8n Header Auth validation
+              curl -s -X POST "$WEBHOOK_URL" \
+                -H "Content-Type: application/json" \
+                -H "X-GitHub-Webhook-Secret: $WEBHOOK_SECRET" \
+                -d "$PAYLOAD" \
+                --max-time 30 || echo "Webhook delivery failed (non-fatal)"
+            else
+              echo "::warning::GITHUB_WEBHOOK_SECRET not configured - sending unauthenticated webhook"
+              curl -s -X POST "$WEBHOOK_URL" \
+                -H "Content-Type: application/json" \
+                -d "$PAYLOAD" \
+                --max-time 30 || echo "Webhook delivery failed (non-fatal)"
+            fi
             echo "Webhook sent successfully"
           else
             echo "FINALIZE_WEBHOOK_URL not configured - skipping webhook"
