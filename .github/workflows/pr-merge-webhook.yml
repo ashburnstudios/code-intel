@@ -1,0 +1,90 @@
+name: PR Merge Webhook
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+jobs:
+  notify-finalize:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract issue key from branch
+        id: extract
+        run: |
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+          # Extract issue key (e.g., fnd-123, FND-123, proj-1)
+          # Pattern: word characters + hyphen + digits at start of branch name
+          if [[ "$BRANCH" =~ ^([a-zA-Z]+-[0-9]+) ]]; then
+            ISSUE_KEY="${BASH_REMATCH[1]}"
+            # Uppercase for Jira
+            ISSUE_KEY=$(echo "$ISSUE_KEY" | tr '[:lower:]' '[:upper:]')
+            echo "issue_key=$ISSUE_KEY" >> $GITHUB_OUTPUT
+            echo "has_issue=true" >> $GITHUB_OUTPUT
+            echo "Extracted issue key: $ISSUE_KEY from branch: $BRANCH"
+          else
+            echo "has_issue=false" >> $GITHUB_OUTPUT
+            echo "No issue key found in branch: $BRANCH"
+          fi
+
+      - name: Send webhook to n8n
+        if: steps.extract.outputs.has_issue == 'true'
+        env:
+          WEBHOOK_URL: ${{ vars.FINALIZE_WEBHOOK_URL }}
+          # Use env vars to safely pass values that may contain special characters
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Build payload using jq to safely construct JSON with special characters
+          PAYLOAD=$(jq -n \
+            --arg issue_key "${{ steps.extract.outputs.issue_key }}" \
+            --arg branch "${{ steps.extract.outputs.branch }}" \
+            --arg pr_url "${{ github.event.pull_request.html_url }}" \
+            --argjson pr_number "${{ github.event.pull_request.number }}" \
+            --arg pr_title "$PR_TITLE" \
+            --arg merged_by "${{ github.event.pull_request.merged_by.login }}" \
+            --arg merged_at "${{ github.event.pull_request.merged_at }}" \
+            --arg repository "${{ github.repository }}" \
+            --arg repo_name "${{ github.event.repository.name }}" \
+            '{
+              event: "pr_merged",
+              issue_key: $issue_key,
+              branch: $branch,
+              pr_url: $pr_url,
+              pr_number: $pr_number,
+              pr_title: $pr_title,
+              merged_by: $merged_by,
+              merged_at: $merged_at,
+              repository: $repository,
+              repo_name: $repo_name
+            }'
+          )
+
+          echo "Sending webhook for ${{ steps.extract.outputs.issue_key }}..."
+
+          # Send webhook (fail silently if URL not configured)
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              --max-time 30 || echo "Webhook delivery failed (non-fatal)"
+            echo "Webhook sent successfully"
+          else
+            echo "FINALIZE_WEBHOOK_URL not configured - skipping webhook"
+          fi
+
+      - name: Summary
+        run: |
+          if [ "${{ steps.extract.outputs.has_issue }}" == "true" ]; then
+            echo "### PR Merge Webhook" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Issue:** ${{ steps.extract.outputs.issue_key }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Branch:** ${{ steps.extract.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Merged by:** ${{ github.event.pull_request.merged_by.login }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### PR Merge Webhook" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No issue key found in branch name: ${{ github.event.pull_request.head.ref }}" >> $GITHUB_STEP_SUMMARY
+          fi

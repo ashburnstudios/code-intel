@@ -99,6 +99,28 @@ This project tracks work in the CINT Jira space. Cards follow the pattern:
 - `CINT-XX` for code-intel library work
 - `GTWY-XX` for Gateway MCP plugin work
 
+## Foundry Integration
+
+This repo is integrated with Foundry for autonomous development. Two GitHub workflows enable this:
+
+### PR Review (`.github/workflows/pr-review.yml`)
+Triggers on PR open/synchronize/reopen to main. Sends webhook to n8n which invokes Foundry's AI code review. The workflow waits up to 10 minutes for the review to complete:
+- HTTP 200: Review passed (LGTM or Minor Issues) - PR can merge
+- HTTP 422: Major issues found - PR blocked until addressed
+
+### PR Merge Webhook (`.github/workflows/pr-merge-webhook.yml`)
+Triggers when a PR is merged to main. Extracts the Jira issue key from the branch name (e.g., `cint-123-feature` → `CINT-123`) and notifies n8n to:
+- Transition the Jira card through the workflow
+- Clean up the topic branch
+- Advance the sprint if applicable
+
+### Branch Naming Convention
+For Foundry integration to work, branch names must start with the Jira issue key:
+- `cint-123-add-typescript-parser` ✓
+- `feature/add-typescript-parser` ✗ (no issue key)
+
+The webhook URLs (`PR_REVIEW_WEBHOOK_URL`, `FINALIZE_WEBHOOK_URL`) are configured at the ashburnstudios org level.
+
 ## Version Control
 
 Uses git with conventional commits. Commit regularly and autonomously when completing logical units of work.

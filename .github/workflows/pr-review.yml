@@ -1,0 +1,124 @@
+name: PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+# Cancel in-progress reviews when new commits are pushed
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  trigger-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Extract PR context
+        id: extract
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+          # Extract issue key from branch (if present)
+          BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+
+          if [[ "$BRANCH" =~ ^([a-zA-Z]+-[0-9]+) ]]; then
+            ISSUE_KEY="${BASH_REMATCH[1]}"
+            ISSUE_KEY=$(echo "$ISSUE_KEY" | tr '[:lower:]' '[:upper:]')
+            echo "issue_key=$ISSUE_KEY" >> $GITHUB_OUTPUT
+            echo "has_issue=true" >> $GITHUB_OUTPUT
+          else
+            echo "issue_key=" >> $GITHUB_OUTPUT
+            echo "has_issue=false" >> $GITHUB_OUTPUT
+          fi
+
+          echo "Extracted: PR #$PR_NUMBER from branch $BRANCH"
+
+      - name: Send webhook to n8n
+        env:
+          WEBHOOK_URL: ${{ vars.PR_REVIEW_WEBHOOK_URL }}
+          # Use env vars to safely pass values that may contain special characters
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Build payload using jq to safely construct JSON with special characters
+          PAYLOAD=$(jq -n \
+            --argjson pr_number "${{ github.event.pull_request.number }}" \
+            --arg pr_title "$PR_TITLE" \
+            --arg pr_author "${{ github.event.pull_request.user.login }}" \
+            --arg base_branch "${{ github.event.pull_request.base.ref }}" \
+            --arg head_branch "${{ github.event.pull_request.head.ref }}" \
+            --arg issue_key "${{ steps.extract.outputs.issue_key }}" \
+            --arg repository "${{ github.repository }}" \
+            --arg repo_name "${{ github.event.repository.name }}" \
+            --arg action "${{ github.event.action }}" \
+            --arg pr_url "${{ github.event.pull_request.html_url }}" \
+            --arg sender "${{ github.event.sender.login }}" \
+            --arg triggered_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              event: "pr_review_requested",
+              pr_number: $pr_number,
+              pr_title: $pr_title,
+              pr_author: $pr_author,
+              base_branch: $base_branch,
+              head_branch: $head_branch,
+              issue_key: $issue_key,
+              repository: $repository,
+              repo_name: $repo_name,
+              action: $action,
+              pr_url: $pr_url,
+              sender: $sender,
+              triggered_at: $triggered_at
+            }'
+          )
+
+          echo "Sending review request for PR #${{ github.event.pull_request.number }}..."
+
+          # Send webhook and wait for review to complete
+          # The webhook now waits for the entire review process before responding
+          # Returns HTTP 200 for LGTM/Minor Issues, HTTP 422 for major issues, HTTP 400 for bad requests
+          if [ -n "$WEBHOOK_URL" ]; then
+            echo "Sending webhook and waiting for review to complete..."
+            echo "This may take several minutes for AI-powered code review."
+
+            HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST "$WEBHOOK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$PAYLOAD" \
+              --max-time 600) || true
+
+            echo "Response (HTTP $HTTP_CODE):"
+            cat /tmp/response.txt 2>/dev/null | jq . 2>/dev/null || cat /tmp/response.txt 2>/dev/null || true
+
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo "✅ Review passed (LGTM or Minor Issues)"
+            elif [ "$HTTP_CODE" = "422" ]; then
+              echo "❌ Review found major issues or blocking concerns"
+              echo "::error::PR review found issues requiring changes"
+              exit 1
+            elif [ "$HTTP_CODE" -ge 400 ]; then
+              echo "❌ Review request failed (HTTP $HTTP_CODE)"
+              echo "::error::PR review webhook failed with HTTP $HTTP_CODE"
+              exit 1
+            else
+              echo "⚠️ Unexpected response code: $HTTP_CODE"
+              echo "::warning::Unexpected HTTP response from PR review"
+            fi
+          else
+            echo "PR_REVIEW_WEBHOOK_URL not configured - skipping webhook"
+          fi
+
+      - name: Summary
+        run: |
+          echo "### PR Review Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **PR:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Title:** ${{ github.event.pull_request.title }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Author:** ${{ github.event.pull_request.user.login }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Event:** ${{ github.event.action }}" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.extract.outputs.has_issue }}" == "true" ]; then
+            echo "- **Issue:** ${{ steps.extract.outputs.issue_key }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The AI code review has completed. Check the PR comments for the review results." >> $GITHUB_STEP_SUMMARY

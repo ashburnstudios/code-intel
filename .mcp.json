@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "gateway": {
+      "command": "gateway-mcp",
+      "args": ["serve"],
+      "env": {
+        "MEMORIA_WORKSPACE": "code-intel",
+        "OBSIDIAN_VAULTS": "brain:~/Projects/brain"
+      }
+    }
+  }
+}
