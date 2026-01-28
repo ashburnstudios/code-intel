@@ -1,0 +1,75 @@
+[project]
+name = "code-intel"
+version = "0.1.0"
+description = "Code graph intelligence for AI assistants - semantic code understanding via AST analysis"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Ashburn Studios" },
+]
+keywords = [
+    "ai",
+    "code-analysis",
+    "ast",
+    "tree-sitter",
+    "code-graph",
+    "semantic-search",
+    "llm",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "tree-sitter>=0.21.0",
+    "pydantic>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ashburnstudios/code-intel"
+Documentation = "https://github.com/ashburnstudios/code-intel#readme"
+Repository = "https://github.com/ashburnstudios/code-intel.git"
+Issues = "https://github.com/ashburnstudios/code-intel/issues"
+Changelog = "https://github.com/ashburnstudios/code-intel/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+# Language-specific tree-sitter grammars
+typescript = [
+    "tree-sitter-typescript>=0.21.0",
+]
+python = [
+    "tree-sitter-python>=0.21.0",
+]
+csharp = [
+    "tree-sitter-c-sharp>=0.21.0",
+]
+all-languages = [
+    "tree-sitter-typescript>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-c-sharp>=0.21.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/code_intel"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
