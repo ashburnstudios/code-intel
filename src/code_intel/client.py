@@ -429,19 +429,50 @@ class CodeIntelClient:
         repo_path: Path,
         exclude_patterns: list[str],
     ) -> bool:
-        """Check if a file matches any exclude pattern."""
+        """Check if a file matches any exclude pattern.
+
+        Handles various glob patterns:
+        - **/.venv/** - directory anywhere in path
+        - **/*.pyc - file extension anywhere in path
+        - .venv/** - directory at root
+        - node_modules/*/*.py - specific path pattern
+        """
         # Get relative path for pattern matching
         try:
             rel_path = file_path.relative_to(repo_path)
         except ValueError:
             rel_path = file_path
 
+        rel_str = str(rel_path)
+        parts = rel_path.parts
+
         for pattern in exclude_patterns:
-            if rel_path.match(pattern):
-                return True
-            # Also check against absolute path for patterns like **/node_modules/**
-            if file_path.match(pattern):
-                return True
+            # Pattern like **/.venv/** - directory anywhere in path
+            if pattern.startswith("**/") and pattern.endswith("/**"):
+                dir_name = pattern[3:-3]  # Extract e.g., ".venv" from "**/.venv/**"
+                if dir_name in parts:
+                    return True
+            # Pattern like **/*.pyc - file extension match anywhere
+            elif pattern.startswith("**/") and "*" not in pattern[3:]:
+                # Simple suffix like **/*.pyc
+                suffix = pattern[3:]  # e.g., "*.pyc"
+                if suffix.startswith("*."):
+                    ext = suffix[1:]  # e.g., ".pyc"
+                    if rel_str.endswith(ext):
+                        return True
+                elif rel_str.endswith(suffix) or f"/{suffix}" in f"/{rel_str}":
+                    return True
+            # Pattern like .venv/** - directory at root
+            elif pattern.endswith("/**"):
+                prefix = pattern[:-3]
+                if rel_str.startswith(prefix) or rel_str.startswith(prefix + "/"):
+                    return True
+            else:
+                # Fallback to Path.match for other patterns like node_modules/*/*.py
+                if rel_path.match(pattern):
+                    return True
+                if file_path.match(pattern):
+                    return True
 
         return False
 
@@ -577,13 +608,14 @@ class CodeIntelClient:
         """
         # Handle special <module> placeholder
         if name == "<module>":
-            # Find the module node for this file, or create a synthetic ID
+            # Find the module node for this file
             nodes = self._storage.get_nodes_by_file(file_path, repo_path)
             for node in nodes:
                 if node.kind == NodeKind.MODULE:
                     return node.id
-            # No explicit module node, use file path as synthetic ID
-            return f"{file_path}:<module>:1"
+            # No explicit module node - return None to skip this edge
+            # (Cannot use synthetic ID as it would violate FK constraint)
+            return None
 
         # Search in current file first
         nodes = self._storage.get_nodes_by_file(file_path, repo_path)
