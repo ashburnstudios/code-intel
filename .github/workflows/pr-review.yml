@@ -40,6 +40,7 @@ jobs:
       - name: Send webhook to n8n
         env:
           WEBHOOK_URL: ${{ vars.PR_REVIEW_WEBHOOK_URL }}
+          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
           # Use env vars to safely pass values that may contain special characters
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
@@ -85,6 +86,7 @@ jobs:
 
             HTTP_CODE=$(curl -s -o /tmp/response.txt -w "%{http_code}" -X POST "$WEBHOOK_URL" \
               -H "Content-Type: application/json" \
+              -H "X-GitHub-Webhook-Secret: $WEBHOOK_SECRET" \
               -d "$PAYLOAD" \
               --max-time 600) || true
 
