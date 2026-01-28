@@ -9,6 +9,20 @@ from code_intel.parser.registry import (
     register_parser,
 )
 
+# Language-specific parsers (lazy imports to avoid requiring all grammars)
+def get_python_parser():
+    """Get the Python parser instance.
+
+    Returns:
+        PythonParser instance.
+
+    Raises:
+        ImportError: If tree-sitter-python is not installed.
+    """
+    from code_intel.parser.python import PythonParser
+    return PythonParser()
+
+
 __all__ = [
     # Base classes and dataclasses
     "BaseParser",
@@ -21,4 +35,6 @@ __all__ = [
     "get_parser",
     "get_parser_for_file",
     "register_parser",
+    # Parser factory functions
+    "get_python_parser",
 ]
