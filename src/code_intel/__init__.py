@@ -18,6 +18,7 @@ from code_intel.parser.registry import (
     get_parser_for_file,
     register_parser,
 )
+from code_intel.parser import get_python_parser
 
 __version__ = "0.1.0"
 
@@ -41,5 +42,6 @@ __all__ = [
     "get_global_registry",
     "get_parser",
     "get_parser_for_file",
+    "get_python_parser",
     "register_parser",
 ]
