@@ -474,6 +474,258 @@ class GraphStorage:
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
         )
 
+    # ========================================================================
+    # Query Methods
+    # ========================================================================
+
+    def find_callers(
+        self,
+        symbol_name: str,
+        repo_path: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[GraphNode]:
+        """Find all nodes that call the given symbol.
+
+        Args:
+            symbol_name: Name of the symbol to find callers for.
+            repo_path: Repository path to scope the search.
+            limit: Maximum number of results to return. None for unlimited.
+            offset: Number of results to skip (for pagination).
+
+        Returns:
+            List of GraphNode objects representing callers.
+        """
+        query = """
+            SELECT DISTINCT source.*
+            FROM nodes source
+            JOIN edges ON edges.source_id = source.id
+            JOIN nodes target ON edges.target_id = target.id
+            WHERE target.name = ?
+              AND source.repo_path = ?
+              AND edges.edge_type = ?
+            ORDER BY source.file_path, source.start_line
+        """
+        params: list[str | int] = [symbol_name, repo_path, EdgeKind.CALLS.value]
+
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset > 0:
+            query += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [self._row_to_node(row) for row in cursor.fetchall()]
+
+    def find_callees(
+        self,
+        symbol_name: str,
+        repo_path: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[GraphNode]:
+        """Find all nodes called by the given symbol.
+
+        Args:
+            symbol_name: Name of the symbol to find callees for.
+            repo_path: Repository path to scope the search.
+            limit: Maximum number of results to return. None for unlimited.
+            offset: Number of results to skip (for pagination).
+
+        Returns:
+            List of GraphNode objects representing callees.
+        """
+        query = """
+            SELECT DISTINCT target.*
+            FROM nodes source
+            JOIN edges ON edges.source_id = source.id
+            JOIN nodes target ON edges.target_id = target.id
+            WHERE source.name = ?
+              AND source.repo_path = ?
+              AND edges.edge_type = ?
+            ORDER BY target.file_path, target.start_line
+        """
+        params: list[str | int] = [symbol_name, repo_path, EdgeKind.CALLS.value]
+
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset > 0:
+            query += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [self._row_to_node(row) for row in cursor.fetchall()]
+
+    def find_references(
+        self,
+        symbol_name: str,
+        repo_path: str,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[GraphNode]:
+        """Find all nodes that reference the given symbol.
+
+        This is broader than find_callers as it includes all types of
+        references (calls, imports, type references, etc.).
+
+        Args:
+            symbol_name: Name of the symbol to find references for.
+            repo_path: Repository path to scope the search.
+            limit: Maximum number of results to return. None for unlimited.
+            offset: Number of results to skip (for pagination).
+
+        Returns:
+            List of GraphNode objects representing referencing nodes.
+        """
+        # Include multiple edge types that constitute a "reference"
+        reference_types = (
+            EdgeKind.CALLS.value,
+            EdgeKind.REFERENCES.value,
+            EdgeKind.IMPORTS.value,
+            EdgeKind.INSTANTIATES.value,
+            EdgeKind.INHERITS.value,
+            EdgeKind.IMPLEMENTS.value,
+        )
+        placeholders = ",".join("?" for _ in reference_types)
+
+        query = f"""
+            SELECT DISTINCT source.*
+            FROM nodes source
+            JOIN edges ON edges.source_id = source.id
+            JOIN nodes target ON edges.target_id = target.id
+            WHERE target.name = ?
+              AND source.repo_path = ?
+              AND edges.edge_type IN ({placeholders})
+            ORDER BY source.file_path, source.start_line
+        """
+        params: list[str | int] = [symbol_name, repo_path, *reference_types]
+
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+        elif offset > 0:
+            query += " LIMIT -1 OFFSET ?"
+            params.append(offset)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [self._row_to_node(row) for row in cursor.fetchall()]
+
+    def get_symbol_info(
+        self,
+        symbol_name: str,
+        repo_path: str,
+        *,
+        qualified_name: str | None = None,
+        node_type: NodeKind | None = None,
+    ) -> GraphNode | None:
+        """Get detailed information about a symbol.
+
+        If multiple symbols match, returns the first one. Use qualified_name
+        or node_type to disambiguate.
+
+        Args:
+            symbol_name: Name of the symbol to look up.
+            repo_path: Repository path to scope the search.
+            qualified_name: Optional fully qualified name for disambiguation.
+            node_type: Optional node type filter.
+
+        Returns:
+            GraphNode if found, None otherwise.
+        """
+        query = "SELECT * FROM nodes WHERE name = ? AND repo_path = ?"
+        params: list[str] = [symbol_name, repo_path]
+
+        if qualified_name:
+            query += " AND qualified_name = ?"
+            params.append(qualified_name)
+
+        if node_type:
+            query += " AND node_type = ?"
+            params.append(node_type.value)
+
+        query += " LIMIT 1"
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            row = cursor.fetchone()
+            return self._row_to_node(row) if row else None
+
+    def get_import_graph(
+        self,
+        file_path: str,
+        repo_path: str,
+        *,
+        depth: int = 1,
+    ) -> list[GraphEdge]:
+        """Get import relationships for a file.
+
+        Returns edges representing imports, optionally traversing
+        transitive imports up to the specified depth.
+
+        Args:
+            file_path: Path to the source file.
+            repo_path: Repository path to scope the search.
+            depth: How many levels of transitive imports to include.
+                   1 = direct imports only, 2+ = include imports of imports.
+
+        Returns:
+            List of GraphEdge objects representing import relationships.
+        """
+        if depth < 1:
+            return []
+
+        all_edges: list[GraphEdge] = []
+        visited_files: set[str] = set()
+        files_to_process: set[str] = {file_path}
+
+        for _ in range(depth):
+            if not files_to_process:
+                break
+
+            current_files = files_to_process.copy()
+            files_to_process.clear()
+
+            for current_file in current_files:
+                if current_file in visited_files:
+                    continue
+                visited_files.add(current_file)
+
+                # Get all import edges originating from nodes in this file
+                query = """
+                    SELECT DISTINCT e.*
+                    FROM edges e
+                    JOIN nodes source ON e.source_id = source.id
+                    JOIN nodes target ON e.target_id = target.id
+                    WHERE source.file_path = ?
+                      AND source.repo_path = ?
+                      AND e.edge_type = ?
+                """
+                with self._get_connection() as conn:
+                    cursor = conn.execute(
+                        query,
+                        (current_file, repo_path, EdgeKind.IMPORTS.value),
+                    )
+                    for row in cursor.fetchall():
+                        edge = self._row_to_edge(row)
+                        all_edges.append(edge)
+
+                        # Get target node's file for transitive imports
+                        target_node = self.get_node(edge.target_id)
+                        if target_node:
+                            target_file = target_node.location.file_path
+                            if target_file not in visited_files:
+                                files_to_process.add(target_file)
+
+        return all_edges
+
     def _row_to_edge(self, row: sqlite3.Row) -> GraphEdge:
         """Convert a database row to a GraphEdge."""
         location = None
