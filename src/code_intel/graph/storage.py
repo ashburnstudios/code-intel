@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,7 +77,8 @@ class GraphStorage:
     """SQLite-backed storage for code graphs.
 
     Provides persistent storage for code graph nodes and edges with
-    efficient querying capabilities.
+    efficient querying capabilities. Thread-safe via thread-local
+    connection management.
 
     Example:
         storage = GraphStorage(Path("project/.code-intel.db"))
@@ -94,41 +96,68 @@ class GraphStorage:
         self._is_memory = db_path is None
         if self._is_memory:
             self._db_path = ":memory:"
-            # For in-memory databases, maintain a persistent connection
-            # since each new connection gets a fresh database
-            self._persistent_conn = sqlite3.connect(":memory:")
-            self._persistent_conn.row_factory = sqlite3.Row
-            self._persistent_conn.execute("PRAGMA foreign_keys = ON")
         else:
             self._db_path = str(Path(db_path).resolve())
-            self._persistent_conn = None
 
+        # Thread-local storage for connections
+        # Each thread gets its own connection to avoid SQLite threading issues
+        self._local = threading.local()
+
+        # Initialise schema in the current thread
         self._initialise_schema()
+
+    def _get_thread_connection(self) -> sqlite3.Connection:
+        """Get or create a connection for the current thread.
+
+        For file-based databases, each thread gets its own connection
+        to the same database file. The schema is stored in the file and
+        shared across all connections.
+
+        For in-memory databases, each thread gets its own separate
+        database instance (since :memory: creates a new DB per connection).
+        The schema is initialised when the connection is created.
+
+        Returns:
+            SQLite connection for the current thread.
+        """
+        if not hasattr(self._local, "conn") or self._local.conn is None:
+            conn = sqlite3.connect(self._db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
+            self._local.conn = conn
+            self._local.needs_schema_init = self._is_memory
+
+        return self._local.conn
 
     @contextmanager
     def _get_connection(self) -> Iterator[sqlite3.Connection]:
-        """Get a database connection with proper configuration."""
-        if self._persistent_conn is not None:
-            # Use the persistent connection for in-memory databases
-            try:
-                yield self._persistent_conn
-                self._persistent_conn.commit()
-            except Exception:
-                self._persistent_conn.rollback()
-                raise
-        else:
-            # Create a new connection for file-based databases
-            conn = sqlite3.connect(self._db_path)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            try:
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
+        """Get a database connection with proper configuration.
+
+        Uses thread-local storage to ensure each thread has its own
+        connection, avoiding SQLite's threading restrictions.
+
+        Yields:
+            SQLite connection configured for this thread.
+        """
+        conn = self._get_thread_connection()
+
+        # For in-memory databases, new threads need schema initialisation
+        # since each in-memory connection is a separate database
+        if getattr(self._local, "needs_schema_init", False):
+            conn.executescript(_CREATE_SCHEMA)
+            conn.execute(
+                "INSERT INTO schema_version (version) VALUES (?)",
+                (SCHEMA_VERSION,),
+            )
+            conn.commit()
+            self._local.needs_schema_init = False
+
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _initialise_schema(self) -> None:
         """Create tables and indexes if they don't exist."""

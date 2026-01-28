@@ -1008,3 +1008,240 @@ class TestImportGraph:
 
         # Should have all 3 edges (a->b, b->c, c->a)
         assert len(result_edges) == 3
+
+
+class TestThreadSafety:
+    """Tests for thread-safe access to GraphStorage."""
+
+    def test_file_based_storage_from_different_thread(self, tmp_path: Path) -> None:
+        """Test that file-based storage can be used from different threads.
+
+        This simulates the Gateway MCP pattern where the client is created
+        in the main thread but operations run via asyncio.to_thread().
+        """
+        import concurrent.futures
+
+        db_path = tmp_path / "threaded.db"
+
+        # Create storage in main thread
+        storage = GraphStorage(db_path)
+
+        # Create a node in the main thread
+        main_node = GraphNode(
+            id="main:func:1",
+            name="main_func",
+            kind=NodeKind.FUNCTION,
+            location=Location(
+                file_path="main.py",
+                start_line=1,
+                start_column=0,
+                end_line=5,
+                end_column=0,
+            ),
+        )
+        storage.create_node(main_node, repo_path="/project")
+
+        # Function to run in worker thread
+        def worker_operation() -> tuple[int, str | None]:
+            """Create a node and read back from worker thread."""
+            # Create a new node in worker thread
+            worker_node = GraphNode(
+                id="worker:func:10",
+                name="worker_func",
+                kind=NodeKind.FUNCTION,
+                location=Location(
+                    file_path="worker.py",
+                    start_line=10,
+                    start_column=0,
+                    end_line=15,
+                    end_column=0,
+                ),
+            )
+            storage.create_node(worker_node, repo_path="/project")
+
+            # Read back the main thread's node
+            retrieved = storage.get_node("main:func:1")
+            retrieved_name = retrieved.name if retrieved else None
+
+            # Count all nodes
+            all_nodes = storage.get_all_nodes()
+            return len(all_nodes), retrieved_name
+
+        # Run in thread pool (simulates asyncio.to_thread)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(worker_operation)
+            node_count, retrieved_name = future.result(timeout=5)
+
+        # Verify worker could read main thread's data
+        assert retrieved_name == "main_func"
+
+        # Verify both nodes exist
+        assert node_count == 2
+
+        # Verify main thread can still access storage
+        all_nodes = storage.get_all_nodes()
+        assert len(all_nodes) == 2
+        node_names = {n.name for n in all_nodes}
+        assert node_names == {"main_func", "worker_func"}
+
+    def test_concurrent_writes_to_file_based_storage(self, tmp_path: Path) -> None:
+        """Test concurrent writes from multiple threads."""
+        import concurrent.futures
+
+        db_path = tmp_path / "concurrent.db"
+        storage = GraphStorage(db_path)
+
+        def create_nodes(thread_id: int) -> int:
+            """Create multiple nodes from a worker thread."""
+            nodes_created = 0
+            for i in range(10):
+                node = GraphNode(
+                    id=f"thread{thread_id}:func:{i}",
+                    name=f"func_{thread_id}_{i}",
+                    kind=NodeKind.FUNCTION,
+                    location=Location(
+                        file_path=f"thread{thread_id}.py",
+                        start_line=i * 10 + 1,  # Lines are 1-indexed
+                        start_column=0,
+                        end_line=i * 10 + 6,
+                        end_column=0,
+                    ),
+                )
+                storage.create_node(node, repo_path="/project")
+                nodes_created += 1
+            return nodes_created
+
+        # Run multiple threads concurrently
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(create_nodes, i) for i in range(4)]
+            results = [f.result(timeout=10) for f in futures]
+
+        # Verify all threads completed
+        assert results == [10, 10, 10, 10]
+
+        # Verify all nodes were created
+        all_nodes = storage.get_all_nodes()
+        assert len(all_nodes) == 40
+
+    def test_in_memory_storage_thread_isolation(self) -> None:
+        """Test that in-memory storage works in multi-threaded context.
+
+        Note: In-memory databases are thread-isolated - each thread gets
+        its own separate database. This test verifies this behaviour works
+        without errors.
+        """
+        import concurrent.futures
+
+        storage = GraphStorage()  # In-memory
+
+        # Create a node in main thread
+        main_node = GraphNode(
+            id="main:func:1",
+            name="main_func",
+            kind=NodeKind.FUNCTION,
+            location=Location(
+                file_path="main.py",
+                start_line=1,
+                start_column=0,
+                end_line=5,
+                end_column=0,
+            ),
+        )
+        storage.create_node(main_node, repo_path="/project")
+
+        def worker_operation() -> tuple[int, int]:
+            """Create nodes in worker thread."""
+            # Worker thread gets its own in-memory database
+            # Create a node in worker thread
+            worker_node = GraphNode(
+                id="worker:func:1",
+                name="worker_func",
+                kind=NodeKind.FUNCTION,
+                location=Location(
+                    file_path="worker.py",
+                    start_line=1,
+                    start_column=0,
+                    end_line=5,
+                    end_column=0,
+                ),
+            )
+            storage.create_node(worker_node, repo_path="/project")
+
+            # Each thread has its own DB, so count will be 1
+            worker_nodes = storage.get_all_nodes()
+            return len(worker_nodes), 1  # Just checking it doesn't crash
+
+        # Run in thread pool - should not raise threading errors
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(worker_operation)
+            worker_count, _ = future.result(timeout=5)
+
+        # Worker thread has its own in-memory DB
+        # This is expected behaviour - in-memory DBs are not shared across threads
+        assert worker_count == 1
+
+        # Main thread still has its node
+        main_nodes = storage.get_all_nodes()
+        assert len(main_nodes) == 1
+
+    def test_simulated_asyncio_to_thread_pattern(self, tmp_path: Path) -> None:
+        """Simulate the exact Gateway MCP pattern that caused the original bug.
+
+        Gateway MCP creates a CodeIntelClient in the main async thread,
+        then uses asyncio.to_thread() to run sync operations in a thread pool.
+        """
+        import asyncio
+        import concurrent.futures
+
+        db_path = tmp_path / "gateway.db"
+
+        # Simulate Gateway plugin creating storage at startup (main thread)
+        storage = GraphStorage(db_path)
+
+        async def simulate_gateway_request() -> dict:
+            """Simulate a Gateway MCP request that indexes files."""
+
+            def sync_index_operation() -> dict:
+                """The sync operation that runs in a worker thread."""
+                results = {"nodes_created": 0, "errors": []}
+
+                for i in range(5):
+                    try:
+                        node = GraphNode(
+                            id=f"file{i}:func:1",
+                            name=f"function_{i}",
+                            kind=NodeKind.FUNCTION,
+                            location=Location(
+                                file_path=f"src/file{i}.py",
+                                start_line=1,
+                                start_column=0,
+                                end_line=10,
+                                end_column=0,
+                            ),
+                        )
+                        storage.create_node(node, repo_path="/project")
+                        results["nodes_created"] += 1
+                    except Exception as e:
+                        results["errors"].append(str(e))
+
+                return results
+
+            # This is what Gateway MCP does - run sync code in thread pool
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, sync_index_operation)
+            return result
+
+        # Run the async simulation
+        loop = asyncio.new_event_loop()
+        try:
+            result = loop.run_until_complete(simulate_gateway_request())
+        finally:
+            loop.close()
+
+        # Verify no errors occurred
+        assert result["errors"] == []
+        assert result["nodes_created"] == 5
+
+        # Verify nodes are accessible from main thread
+        all_nodes = storage.get_all_nodes()
+        assert len(all_nodes) == 5
