@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from code_intel.client import CodeIntelClient, IndexResult, RepoStats
-from code_intel.graph.schema import NodeKind
+from code_intel.graph.schema import EdgeKind, NodeKind
 
 
 def _check_tree_sitter_available():
@@ -596,3 +596,207 @@ class TestRepoStats:
         assert stats.total_edges == 30
         assert stats.nodes_by_kind["function"] == 20
         assert stats.edges_by_kind["calls"] == 25
+
+    def test_default_values(self) -> None:
+        """Test RepoStats default values."""
+        stats = RepoStats(repo_path="/test")
+        assert stats.total_files == 0
+        assert stats.total_nodes == 0
+        assert stats.total_edges == 0
+        assert stats.nodes_by_kind == {}
+        assert stats.edges_by_kind == {}
+
+
+class TestClientInternalMethods:
+    """Tests for CodeIntelClient internal methods that don't need tree-sitter."""
+
+    def test_infer_language_python(self, client: CodeIntelClient) -> None:
+        """Test language inference for Python files."""
+        from pathlib import Path
+        assert client._infer_language(Path("test.py")) == "python"
+        assert client._infer_language(Path("types.pyi")) == "python"
+
+    def test_infer_language_typescript(self, client: CodeIntelClient) -> None:
+        """Test language inference for TypeScript files."""
+        from pathlib import Path
+        assert client._infer_language(Path("app.ts")) == "typescript"
+        assert client._infer_language(Path("Component.tsx")) == "typescript"
+
+    def test_infer_language_javascript(self, client: CodeIntelClient) -> None:
+        """Test language inference for JavaScript files."""
+        from pathlib import Path
+        assert client._infer_language(Path("app.js")) == "javascript"
+        assert client._infer_language(Path("Component.jsx")) == "javascript"
+
+    def test_infer_language_csharp(self, client: CodeIntelClient) -> None:
+        """Test language inference for C# files."""
+        from pathlib import Path
+        assert client._infer_language(Path("Program.cs")) == "csharp"
+
+    def test_infer_language_unknown(self, client: CodeIntelClient) -> None:
+        """Test language inference raises for unknown extensions."""
+        from pathlib import Path
+        with pytest.raises(ValueError, match="Cannot infer language"):
+            client._infer_language(Path("readme.md"))
+
+    def test_map_node_kind(self, client: CodeIntelClient) -> None:
+        """Test mapping string to NodeKind."""
+        assert client._map_node_kind("function") == NodeKind.FUNCTION
+        assert client._map_node_kind("class") == NodeKind.CLASS
+        assert client._map_node_kind("method") == NodeKind.METHOD
+        assert client._map_node_kind("variable") == NodeKind.VARIABLE
+        assert client._map_node_kind("import") == NodeKind.IMPORT
+
+    def test_map_node_kind_case_insensitive(self, client: CodeIntelClient) -> None:
+        """Test that node kind mapping is case insensitive."""
+        assert client._map_node_kind("FUNCTION") == NodeKind.FUNCTION
+        assert client._map_node_kind("Function") == NodeKind.FUNCTION
+        assert client._map_node_kind("CLASS") == NodeKind.CLASS
+
+    def test_map_node_kind_unknown(self, client: CodeIntelClient) -> None:
+        """Test that unknown node kinds default to VARIABLE."""
+        assert client._map_node_kind("unknown_type") == NodeKind.VARIABLE
+        assert client._map_node_kind("") == NodeKind.VARIABLE
+
+    def test_map_edge_kind(self, client: CodeIntelClient) -> None:
+        """Test mapping string to EdgeKind."""
+        assert client._map_edge_kind("calls") == EdgeKind.CALLS
+        assert client._map_edge_kind("imports") == EdgeKind.IMPORTS
+        assert client._map_edge_kind("inherits") == EdgeKind.INHERITS
+        assert client._map_edge_kind("references") == EdgeKind.REFERENCES
+
+    def test_map_edge_kind_case_insensitive(self, client: CodeIntelClient) -> None:
+        """Test that edge kind mapping is case insensitive."""
+        assert client._map_edge_kind("CALLS") == EdgeKind.CALLS
+        assert client._map_edge_kind("Calls") == EdgeKind.CALLS
+
+    def test_map_edge_kind_unknown(self, client: CodeIntelClient) -> None:
+        """Test that unknown edge kinds default to REFERENCES."""
+        assert client._map_edge_kind("unknown_type") == EdgeKind.REFERENCES
+        assert client._map_edge_kind("") == EdgeKind.REFERENCES
+
+    def test_resolve_repo_path_none(self, client: CodeIntelClient) -> None:
+        """Test resolving None repo_path."""
+        assert client._resolve_repo_path(None) == ""
+
+    def test_resolve_repo_path_string(self, client: CodeIntelClient) -> None:
+        """Test resolving string repo_path."""
+        from pathlib import Path
+        result = client._resolve_repo_path("/test/repo")
+        assert result == str(Path("/test/repo").resolve())
+
+    def test_resolve_repo_path_path(self, client: CodeIntelClient) -> None:
+        """Test resolving Path repo_path."""
+        from pathlib import Path
+        result = client._resolve_repo_path(Path("/test/repo"))
+        assert result == str(Path("/test/repo").resolve())
+
+    def test_get_supported_extensions_empty(self, client: CodeIntelClient) -> None:
+        """Test getting extensions when no parsers registered."""
+        assert client._get_supported_extensions() == []
+
+    def test_default_exclude_patterns(self, client: CodeIntelClient) -> None:
+        """Test that default exclude patterns are set."""
+        expected_patterns = [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/__pycache__/**",
+        ]
+        for pattern in expected_patterns:
+            assert pattern in client.DEFAULT_EXCLUDE_PATTERNS
+
+    def test_matches_exclude_pattern(self, client: CodeIntelClient, tmp_path: Path) -> None:
+        """Test exclude pattern matching using actual file paths.
+
+        Note: Path.match() has specific behaviour with ** patterns.
+        Patterns ending in /** only match against directories, while
+        **/*.ext patterns match files with that extension.
+        """
+        # Create actual directory structure
+        node_modules = tmp_path / "node_modules" / "pkg"
+        node_modules.mkdir(parents=True)
+        file_in_node_modules = node_modules / "file.py"
+        file_in_node_modules.write_text("")
+
+        pycache = tmp_path / "src" / "__pycache__"
+        pycache.mkdir(parents=True)
+        pyc_file = pycache / "mod.cpython-310.pyc"
+        pyc_file.write_text("")
+
+        src = tmp_path / "src"
+        main_py = src / "main.py"
+        main_py.write_text("")
+
+        # Test with patterns that Path.match() handles correctly
+        # **/*.pyc matches pyc files
+        assert client._matches_exclude_pattern(
+            pyc_file,
+            tmp_path,
+            ["**/*.pyc"],
+        )
+
+        # node_modules/*/*.py matches files two levels deep in node_modules
+        assert client._matches_exclude_pattern(
+            file_in_node_modules,
+            tmp_path,
+            ["node_modules/*/*.py"],
+        )
+
+        # Should not match regular Python files in src
+        assert not client._matches_exclude_pattern(
+            main_py,
+            tmp_path,
+            ["**/*.pyc", "node_modules/*/*.py"],
+        )
+
+    def test_discover_files_empty_dir(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test discovering files in empty directory."""
+        files = client._discover_files(tmp_path, [".py"], [])
+        assert files == []
+
+    def test_discover_files_with_extension_filter(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test discovering files with extension filter."""
+        # Create test files
+        (tmp_path / "main.py").write_text("x = 1")
+        (tmp_path / "utils.py").write_text("y = 2")
+        (tmp_path / "readme.md").write_text("README")
+
+        files = client._discover_files(tmp_path, [".py"], [])
+
+        assert len(files) == 2
+        assert all(f.suffix == ".py" for f in files)
+
+    def test_discover_files_with_exclude_patterns(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test discovering files with exclude patterns."""
+        # Create test files
+        (tmp_path / "main.py").write_text("x = 1")
+        venv = tmp_path / "venv"
+        venv.mkdir()
+        (venv / "lib.py").write_text("z = 3")
+
+        files = client._discover_files(
+            tmp_path, [".py"], ["**/venv/**"]
+        )
+
+        assert len(files) == 1
+        assert files[0].name == "main.py"
+
+    def test_discover_files_sorted(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test that discovered files are sorted."""
+        # Create files in non-alphabetical order
+        (tmp_path / "z_file.py").write_text("")
+        (tmp_path / "a_file.py").write_text("")
+        (tmp_path / "m_file.py").write_text("")
+
+        files = client._discover_files(tmp_path, [".py"], [])
+
+        names = [f.name for f in files]
+        assert names == sorted(names)
