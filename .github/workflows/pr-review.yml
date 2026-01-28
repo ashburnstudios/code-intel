@@ -40,7 +40,7 @@ jobs:
       - name: Send webhook to n8n
         env:
           WEBHOOK_URL: ${{ vars.PR_REVIEW_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          WEBHOOK_SECRET: ${{ secrets.FOUNDRY_WEBHOOK_SECRET }}
           # Use env vars to safely pass values that may contain special characters
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |

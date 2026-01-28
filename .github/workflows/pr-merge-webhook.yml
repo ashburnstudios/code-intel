@@ -34,7 +34,7 @@ jobs:
         if: steps.extract.outputs.has_issue == 'true'
         env:
           WEBHOOK_URL: ${{ vars.FINALIZE_WEBHOOK_URL }}
-          WEBHOOK_SECRET: ${{ secrets.GITHUB_WEBHOOK_SECRET }}
+          WEBHOOK_SECRET: ${{ secrets.FOUNDRY_WEBHOOK_SECRET }}
           # Use env vars to safely pass values that may contain special characters
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
@@ -75,7 +75,7 @@ jobs:
                 -d "$PAYLOAD" \
                 --max-time 30 || echo "Webhook delivery failed (non-fatal)"
             else
-              echo "::warning::GITHUB_WEBHOOK_SECRET not configured - sending unauthenticated webhook"
+              echo "::warning::FOUNDRY_WEBHOOK_SECRET not configured - sending unauthenticated webhook"
               curl -s -X POST "$WEBHOOK_URL" \
                 -H "Content-Type: application/json" \
                 -d "$PAYLOAD" \
