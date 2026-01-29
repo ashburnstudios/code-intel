@@ -10,6 +10,14 @@ from code_intel.graph.schema import (
     NodeKind,
 )
 from code_intel.graph.storage import GraphStorage
+from code_intel.indexer.roslyn import RoslynIndexer, RoslynIndexResult
+from code_intel.lsp.omnisharp import (
+    OmniSharpError,
+    OmniSharpNotFoundError,
+    OmniSharpServer,
+    OmniSharpTimeoutError,
+)
+from code_intel.parser import get_python_parser
 from code_intel.parser.base import BaseParser, ParsedEdge, ParsedNode, ParseResult
 from code_intel.parser.registry import (
     ParserRegistry,
@@ -18,7 +26,6 @@ from code_intel.parser.registry import (
     get_parser_for_file,
     register_parser,
 )
-from code_intel.parser import get_python_parser
 
 __version__ = "0.1.0"
 
@@ -36,6 +43,14 @@ __all__ = [
     "GraphStorage",
     "Location",
     "NodeKind",
+    # Indexer (LSP-based)
+    "RoslynIndexer",
+    "RoslynIndexResult",
+    # LSP
+    "OmniSharpServer",
+    "OmniSharpError",
+    "OmniSharpNotFoundError",
+    "OmniSharpTimeoutError",
     # Parser
     "BaseParser",
     "ParsedEdge",
