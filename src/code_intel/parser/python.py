@@ -1,11 +1,30 @@
 """Python parser using Tree-sitter for AST analysis."""
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from code_intel.parser.base import BaseParser
 
 if TYPE_CHECKING:
     from tree_sitter import Language, Node, Tree
+
+
+@dataclass
+class ImportEntry:
+    """An entry in the import map tracking what an imported name resolves to.
+
+    Attributes:
+        local_name: The name used in the local scope (may be aliased).
+        module: The fully-qualified module path the import comes from.
+        symbol: The symbol name within the module (None if importing module itself).
+        import_type: One of 'module', 'from', or 'wildcard'.
+    """
+
+    local_name: str
+    module: str
+    symbol: str | None = None
+    import_type: str = "from"
 
 
 class PythonParser(BaseParser):
@@ -507,17 +526,166 @@ class PythonParser(BaseParser):
 
         return False
 
-    def extract_references(self, tree: "Tree", source: bytes) -> list[dict]:
+    def _build_import_map(
+        self,
+        symbols: list[dict],
+        file_path: str | Path | None = None,
+    ) -> dict[str, ImportEntry]:
+        """Build a mapping of imported names to their resolved modules.
+
+        This map enables resolution of module-qualified calls like `jira.add_worklog()`
+        to their actual target symbols across files.
+
+        Args:
+            symbols: List of extracted symbols from the file.
+            file_path: Path to the source file, used for relative import resolution.
+
+        Returns:
+            Dict mapping local names to ImportEntry objects.
+        """
+        import_map: dict[str, ImportEntry] = {}
+
+        for symbol in symbols:
+            if symbol["kind"] != "import":
+                continue
+
+            metadata = symbol.get("metadata", {})
+            import_type = metadata.get("import_type", "module")
+            local_name = symbol["name"]
+            qualified_name = symbol.get("qualified_name", "")
+
+            if import_type == "wildcard":
+                # Wildcard imports can't be reliably resolved
+                # Store them but mark as wildcard so we know resolution is best-effort
+                module = metadata.get("module", "")
+                resolved_module = self._resolve_relative_import(module, file_path)
+                import_map[local_name] = ImportEntry(
+                    local_name=local_name,
+                    module=resolved_module,
+                    symbol=None,
+                    import_type="wildcard",
+                )
+
+            elif import_type == "from":
+                # from x import y or from x import y as z
+                module = metadata.get("module", "")
+                resolved_module = self._resolve_relative_import(module, file_path)
+                original_name = metadata.get("original_name", local_name)
+
+                import_map[local_name] = ImportEntry(
+                    local_name=local_name,
+                    module=resolved_module,
+                    symbol=original_name,
+                    import_type="from",
+                )
+
+            else:
+                # import x or import x as y
+                # qualified_name is the full module path
+                original_name = metadata.get("original_name", qualified_name)
+                resolved_module = self._resolve_relative_import(
+                    original_name, file_path
+                )
+
+                import_map[local_name] = ImportEntry(
+                    local_name=local_name,
+                    module=resolved_module,
+                    symbol=None,
+                    import_type="module",
+                )
+
+        return import_map
+
+    def _resolve_relative_import(
+        self,
+        module_spec: str,
+        file_path: str | Path | None,
+    ) -> str:
+        """Resolve a relative import to an absolute module path.
+
+        Handles import patterns like:
+        - `.sibling` -> resolves based on file_path's package
+        - `..parent` -> resolves to parent package
+        - `...grandparent.module` -> multiple levels up
+
+        Args:
+            module_spec: The module specification, possibly with leading dots.
+            file_path: Path to the source file for context.
+
+        Returns:
+            Absolute module path, or the original spec if not relative or unresolvable.
+        """
+        if not module_spec or not module_spec.startswith("."):
+            return module_spec
+
+        if file_path is None:
+            # Can't resolve relative imports without file path
+            return module_spec
+
+        file_path = Path(file_path)
+
+        # Count leading dots to determine relative level
+        dots = 0
+        for char in module_spec:
+            if char == ".":
+                dots += 1
+            else:
+                break
+
+        # Get the remaining module path after the dots
+        remaining = module_spec[dots:]
+
+        # Build package path from file path
+        # e.g., /project/foundry/smith.py -> foundry (parent is package)
+        parts = list(file_path.parts)
+
+        # Remove filename, we want package path
+        if parts:
+            parts = parts[:-1]
+
+        # Remove directories up based on dot count
+        # `.` = same package (dots=1, go up 0 from parent)
+        # `..` = parent package (dots=2, go up 1)
+        # `...` = grandparent (dots=3, go up 2)
+        levels_up = dots - 1
+        if levels_up > 0 and len(parts) >= levels_up:
+            parts = parts[:-levels_up]
+
+        # Find the package root by looking for parts that look like packages
+        # We assume package names don't have path separators
+        # Try to find the deepest directory that could be a Python package
+        package_parts: list[str] = []
+        for part in reversed(parts):
+            # Skip absolute path roots and common non-package dirs
+            if part in ("", "/", "\\") or part.endswith(":"):
+                break
+            # Common project root markers
+            if part in ("src", "lib", "packages"):
+                break
+            package_parts.insert(0, part)
+
+        # Combine package path with remaining module
+        if package_parts:
+            if remaining:
+                return ".".join(package_parts) + "." + remaining
+            return ".".join(package_parts)
+        elif remaining:
+            return remaining
+        else:
+            return module_spec
+
+    def extract_references(self, tree: "Tree", source: bytes, file_path: str | Path | None = None) -> list[dict]:
         """Extract symbol references from Python AST.
 
         Extracts:
-        - Function calls (call expressions)
+        - Function calls (call expressions) with cross-file resolution hints
         - Import edges (which module imports what)
         - Class inheritance edges
 
         Args:
             tree: Parsed tree-sitter Tree.
             source: Original source bytes.
+            file_path: Path to the source file, used for relative import resolution.
 
         Returns:
             List of reference dictionaries.
@@ -528,23 +696,39 @@ class PythonParser(BaseParser):
         symbols = self.extract_symbols(tree, source)
         symbol_map = {s["qualified_name"]: s for s in symbols if s.get("qualified_name")}
 
+        # Build import map for cross-file call resolution
+        import_map = self._build_import_map(symbols, file_path)
+
         # Extract references
         self._extract_references_recursive(
-            tree.root_node, source, references, context=None, symbol_map=symbol_map
+            tree.root_node, source, references, context=None, symbol_map=symbol_map,
+            import_map=import_map
         )
 
-        # Add inheritance edges
+        # Add inheritance edges with potential cross-file resolution hints
         for symbol in symbols:
             if symbol["kind"] == "class":
                 bases = symbol.get("metadata", {}).get("bases", [])
                 for base in bases:
-                    references.append({
+                    ref = {
                         "source": symbol["qualified_name"],
                         "target": base,
                         "type": "inherits",
                         "line": symbol["line"],
                         "column": symbol["start_column"],
-                    })
+                    }
+
+                    # Check if base class reference can be resolved via imports
+                    # Handle cases like: class Child(module.BaseClass)
+                    if "." in base:
+                        parts = base.split(".", 1)
+                        obj_name, attr_name = parts[0], parts[1]
+                        if obj_name in import_map:
+                            entry = import_map[obj_name]
+                            ref["target"] = attr_name
+                            ref["metadata"] = {"target_module": entry.module}
+
+                    references.append(ref)
 
         # Add import edges
         for symbol in symbols:
@@ -585,6 +769,7 @@ class PythonParser(BaseParser):
         references: list[dict],
         context: dict | None,
         symbol_map: dict,
+        import_map: dict[str, ImportEntry] | None = None,
     ) -> None:
         """Recursively extract references from AST nodes.
 
@@ -594,7 +779,11 @@ class PythonParser(BaseParser):
             references: List to append references to.
             context: Current scope context (function/class name).
             symbol_map: Map of qualified names to symbols.
+            import_map: Map of imported names to their resolved modules.
         """
+        if import_map is None:
+            import_map = {}
+
         # Track context for calls
         new_context = context
 
@@ -627,12 +816,12 @@ class PythonParser(BaseParser):
                 }
 
         elif node.type == "call":
-            self._extract_call_reference(node, source, references, context)
+            self._extract_call_reference(node, source, references, context, import_map)
 
         # Recurse into children
         for child in node.children:
             self._extract_references_recursive(
-                child, source, references, new_context, symbol_map
+                child, source, references, new_context, symbol_map, import_map
             )
 
     def _extract_call_reference(
@@ -641,8 +830,25 @@ class PythonParser(BaseParser):
         source: bytes,
         references: list[dict],
         context: dict | None,
+        import_map: dict[str, ImportEntry] | None = None,
     ) -> None:
-        """Extract a function call reference."""
+        """Extract a function call reference with cross-file resolution hints.
+
+        For attribute access patterns like `jira.add_worklog()`, this method:
+        1. Splits the call into object and attribute parts
+        2. Looks up the object in the import map
+        3. If found, emits an edge with target_module metadata for cross-file resolution
+
+        Args:
+            node: The call AST node.
+            source: Original source bytes.
+            references: List to append references to.
+            context: Current scope context (function/class name).
+            import_map: Map of imported names to their resolved modules.
+        """
+        if import_map is None:
+            import_map = {}
+
         # Get the function being called
         function_node = node.child_by_field_name("function")
         if function_node is None:
@@ -653,21 +859,88 @@ class PythonParser(BaseParser):
         if context and context.get("qualified_name"):
             caller = context["qualified_name"]
 
-        # Get the callee name
+        # Get the callee name and potentially resolve via import map
+        metadata: dict = {}
+
         if function_node.type == "identifier":
             # Simple call: foo()
             callee = self.get_node_text(function_node, source)
+
+            # Check if this is a directly imported symbol (from x import foo or from x import foo as bar)
+            if callee in import_map:
+                entry = import_map[callee]
+                if entry.import_type == "from" and entry.symbol:
+                    # Use the original symbol name (not alias) for better matching
+                    callee = entry.symbol
+                    metadata["target_module"] = entry.module
+
         elif function_node.type == "attribute":
-            # Method call: obj.method()
-            callee = self.get_node_text(function_node, source)
+            # Method/attribute call: obj.method() or module.function()
+            full_callee = self.get_node_text(function_node, source)
+
+            # Split into object and attribute
+            # Handle nested attributes: a.b.c() -> obj="a.b", attr="c"
+            if "." in full_callee:
+                # Find the first part to check against imports
+                parts = full_callee.split(".")
+                first_part = parts[0]
+
+                if first_part in import_map:
+                    entry = import_map[first_part]
+
+                    if entry.import_type == "module":
+                        # import jira or import jira as j
+                        # jira.add_worklog() -> target: add_worklog, module: jira
+                        callee = ".".join(parts[1:])  # Everything after the import alias
+                        # Build the full module path including nested attributes except the final call
+                        if len(parts) > 2:
+                            # a.b.c() where a is imported module
+                            # target_module should be the submodule path
+                            metadata["target_module"] = entry.module + "." + ".".join(parts[1:-1])
+                        else:
+                            metadata["target_module"] = entry.module
+
+                    elif entry.import_type == "from" and entry.symbol:
+                        # from foundry import jira; jira.add_worklog()
+                        # This means jira is actually foundry.jira module
+                        callee = ".".join(parts[1:])
+                        metadata["target_module"] = entry.module + "." + entry.symbol
+
+                    else:
+                        # Unresolved or wildcard import - keep full name for fallback matching
+                        callee = full_callee
+
+                elif first_part == "self":
+                    # self.method() - extract just the method name
+                    # Same-class resolution will match by name or qualified_name
+                    callee = ".".join(parts[1:])  # "self.process" -> "process"
+                    metadata["same_class_call"] = True
+
+                elif first_part == "cls":
+                    # cls.method() - classmethod calling another classmethod
+                    callee = ".".join(parts[1:])
+                    metadata["same_class_call"] = True
+
+                else:
+                    # Unknown object (local variable, parameter, etc.)
+                    # Keep the full qualified name for best-effort matching
+                    callee = full_callee
+            else:
+                # No dot in attribute access (shouldn't happen for attribute type)
+                callee = full_callee
         else:
             # Complex call expression, skip for now
             return
 
-        references.append({
+        ref = {
             "source": caller,
             "target": callee,
             "type": "calls",
             "line": node.start_point[0] + 1,
             "column": node.start_point[1],
-        })
+        }
+
+        if metadata:
+            ref["metadata"] = metadata
+
+        references.append(ref)

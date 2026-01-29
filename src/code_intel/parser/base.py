@@ -182,12 +182,13 @@ class BaseParser(ABC):
         ...
 
     @abstractmethod
-    def extract_references(self, tree: "Tree", source: bytes) -> list[dict]:
+    def extract_references(self, tree: "Tree", source: bytes, file_path: Path | str | None = None) -> list[dict]:
         """Extract symbol references from the AST.
 
         Args:
             tree: Parsed tree-sitter Tree.
             source: Original source bytes (for extracting text).
+            file_path: Optional path to the source file, used for relative import resolution.
 
         Returns:
             List of reference dictionaries with name, location, etc.
@@ -253,7 +254,7 @@ class BaseParser(ABC):
 
         # Extract references and convert to ParsedEdge
         edges: list[ParsedEdge] = []
-        references = self.extract_references(tree, source)
+        references = self.extract_references(tree, source, file_path)
         for ref in references:
             edge = ParsedEdge(
                 source_name=ref.get("source", ref.get("from", "")),
