@@ -19,10 +19,8 @@ from code_intel.lsp.omnisharp import (
     OmniSharpTimeoutError,
 )
 from code_intel.lsp.protocol import (
-    CodeElement,
     CodeStructureResponse,
     GotoDefinitionResponse,
-    QuickFix,
     QuickFixResponse,
 )
 
@@ -293,7 +291,7 @@ class TestOmniSharpServerRequests:
     """Tests for request/response handling."""
 
     def test_send_request_builds_correct_message(self, tmp_path: Path):
-        """Test that requests are formatted correctly."""
+        """Test that requests are formatted correctly as JSON lines."""
         solution = tmp_path / "Test.sln"
         solution.write_text("")
         omnisharp = tmp_path / "omnisharp"
@@ -315,10 +313,15 @@ class TestOmniSharpServerRequests:
         mock_stdin.write.assert_called_once()
         mock_stdin.flush.assert_called_once()
 
-        # Verify message format
+        # Verify message format - OmniSharp uses JSON lines (newline-delimited JSON)
         written = mock_stdin.write.call_args[0][0]
-        assert b"Content-Length:" in written
-        assert b'"/test"' in written
+        assert written.endswith(b"\n"), "Message should end with newline"
+        # Parse the JSON to verify it's valid
+        data = json.loads(written.decode("utf-8"))
+        assert data["command"] == "/test"
+        assert data["arguments"] == {"arg": "value"}
+        assert data["seq"] == 1
+        assert data["Type"] == "request"
 
     def test_send_request_without_process_raises_error(self, tmp_path: Path):
         """Test that sending request without process raises error."""
@@ -480,3 +483,251 @@ class TestOmniSharpServerExceptions:
         """Test that OmniSharpTimeoutError inherits from OmniSharpError."""
         error = OmniSharpTimeoutError("timeout")
         assert isinstance(error, OmniSharpError)
+
+
+class TestOmniSharpServerSolutionParsing:
+    """Tests for solution file parsing."""
+
+    def test_count_solution_projects_single_project(self, tmp_path: Path):
+        """Test counting projects in a solution with one project."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("""
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp", "MyApp\\MyApp.csproj", "{12345678-1234-1234-1234-123456789012}"
+EndProject
+Global
+EndGlobal
+""")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        count = server._count_solution_projects()
+
+        assert count == 1
+
+    def test_count_solution_projects_multiple_projects(self, tmp_path: Path):
+        """Test counting projects in a solution with multiple projects."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("""
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp", "MyApp\\MyApp.csproj", "{12345678-1234-1234-1234-123456789012}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp.Core", "MyApp.Core\\MyApp.Core.csproj", "{12345678-1234-1234-1234-123456789013}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp.Tests", "MyApp.Tests\\MyApp.Tests.csproj", "{12345678-1234-1234-1234-123456789014}"
+EndProject
+Global
+EndGlobal
+""")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        count = server._count_solution_projects()
+
+        assert count == 3
+
+    def test_count_solution_projects_ignores_solution_folders(self, tmp_path: Path):
+        """Test that solution folders are not counted as projects."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("""
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{FOLDER-GUID}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MyApp", "src\\MyApp\\MyApp.csproj", "{12345678-1234-1234-1234-123456789012}"
+EndProject
+Global
+EndGlobal
+""")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        count = server._count_solution_projects()
+
+        assert count == 1  # Should not count the folder
+
+    def test_count_solution_projects_with_fsproj(self, tmp_path: Path):
+        """Test counting F# projects in a solution."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("""
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "MyFSharp", "MyFSharp\\MyFSharp.fsproj", "{12345678-1234-1234-1234-123456789012}"
+EndProject
+Global
+EndGlobal
+""")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        count = server._count_solution_projects()
+
+        assert count == 1
+
+    def test_count_solution_projects_csproj_returns_one(self, tmp_path: Path):
+        """Test that a .csproj file returns 1 as expected project count."""
+        csproj = tmp_path / "MyApp.csproj"
+        csproj.write_text("<Project></Project>")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(csproj, omnisharp_path=omnisharp)
+        count = server._count_solution_projects()
+
+        assert count == 1
+
+    def test_count_solution_projects_empty_solution(self, tmp_path: Path):
+        """Test counting projects in an empty solution."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("""
+Microsoft Visual Studio Solution File, Format Version 12.00
+Global
+EndGlobal
+""")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        count = server._count_solution_projects()
+
+        assert count == 0
+
+
+class TestOmniSharpServerProjectEvents:
+    """Tests for project event handling."""
+
+    def test_handle_project_added_event(self, tmp_path: Path):
+        """Test that ProjectAdded events are tracked."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        server._expected_project_count = 2
+
+        # Simulate ProjectAdded events
+        server._handle_event("ProjectAdded", {
+            "MsBuildProject": {"Path": "/path/to/MyApp.csproj", "AssemblyName": "MyApp"}
+        })
+
+        assert "/path/to/MyApp.csproj" in server._projects_loaded
+        assert len(server._projects_loaded) == 1
+
+        # Add another project
+        server._handle_event("ProjectAdded", {
+            "MsBuildProject": {"Path": "/path/to/MyApp.Core.csproj", "AssemblyName": "MyApp.Core"}
+        })
+
+        assert len(server._projects_loaded) == 2
+
+    def test_handle_project_added_event_flat_body(self, tmp_path: Path):
+        """Test that ProjectAdded events with flat body format are handled."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        server._expected_project_count = 1
+
+        # Simulate ProjectAdded event with flat body (no MsBuildProject wrapper)
+        server._handle_event("ProjectAdded", {
+            "Path": "/path/to/MyApp.csproj",
+            "AssemblyName": "MyApp"
+        })
+
+        assert "/path/to/MyApp.csproj" in server._projects_loaded
+
+    def test_handle_project_added_event_sets_event(self, tmp_path: Path):
+        """Test that ProjectAdded events signal the projects_loaded_event."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        server._expected_project_count = 1
+        server._projects_loaded_event.clear()
+
+        server._handle_event("ProjectAdded", {
+            "MsBuildProject": {"Path": "/path/to/MyApp.csproj"}
+        })
+
+        assert server._projects_loaded_event.is_set()
+
+    def test_handle_duplicate_project_added_event(self, tmp_path: Path):
+        """Test that duplicate ProjectAdded events are ignored."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+        server._expected_project_count = 1
+
+        # Simulate same ProjectAdded event twice
+        server._handle_event("ProjectAdded", {
+            "MsBuildProject": {"Path": "/path/to/MyApp.csproj"}
+        })
+        server._handle_event("ProjectAdded", {
+            "MsBuildProject": {"Path": "/path/to/MyApp.csproj"}
+        })
+
+        assert len(server._projects_loaded) == 1
+
+
+class TestOmniSharpServerProjectLoadTimeout:
+    """Tests for project load timeout configuration."""
+
+    def test_init_default_project_load_timeout(self, tmp_path: Path):
+        """Test that default project load timeout is set."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(solution, omnisharp_path=omnisharp)
+
+        assert server.project_load_timeout == 120.0
+
+    def test_init_custom_project_load_timeout(self, tmp_path: Path):
+        """Test custom project load timeout."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(
+            solution, omnisharp_path=omnisharp, project_load_timeout=60.0
+        )
+
+        assert server.project_load_timeout == 60.0
+
+    def test_init_zero_project_load_timeout_skips_wait(self, tmp_path: Path):
+        """Test that zero project load timeout disables waiting."""
+        solution = tmp_path / "Test.sln"
+        solution.write_text("")
+        omnisharp = tmp_path / "omnisharp"
+        omnisharp.write_text("")
+        omnisharp.chmod(0o755)
+
+        server = OmniSharpServer(
+            solution, omnisharp_path=omnisharp, project_load_timeout=0
+        )
+
+        assert server.project_load_timeout == 0
