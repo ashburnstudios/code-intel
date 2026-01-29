@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -17,6 +18,8 @@ from code_intel.graph.storage import GraphStorage
 
 if TYPE_CHECKING:
     from code_intel.parser.base import BaseParser, ParseResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -195,6 +198,84 @@ class CodeIntelClient:
                 result.errors.append(f"{file_path}: {e}")
 
         return result
+
+    def index_with_roslyn(
+        self,
+        repo_path: Path | str,
+        solution_file: Path | str | None = None,
+        *,
+        force: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ) -> IndexResult:
+        """Index a C# repository using Roslyn/OmniSharp for semantic analysis.
+
+        This method provides semantic code analysis for C# codebases using
+        OmniSharp's Roslyn-based engine. Unlike tree-sitter parsing, this
+        captures full semantic relationships including:
+        - Delegate invocations
+        - Event handlers
+        - Interface dispatch
+        - Virtual method calls
+
+        Args:
+            repo_path: Path to the repository root directory.
+            solution_file: Optional path to .sln or .csproj file. If None,
+                          auto-discovers solution files in the repository.
+            force: If True, re-index even if already indexed (clears existing data).
+            progress_callback: Optional callback for progress updates.
+                              Called with (current, total, message).
+
+        Returns:
+            IndexResult with indexing statistics.
+
+        Raises:
+            ImportError: If omnisharp dependencies are not available.
+
+        Example:
+            client = CodeIntelClient()
+
+            # Index with auto-discovery
+            result = client.index_with_roslyn("/path/to/csharp-repo")
+
+            # Index specific solution
+            result = client.index_with_roslyn(
+                "/path/to/repo",
+                solution_file="/path/to/repo/MySolution.sln"
+            )
+        """
+        # Import here to avoid hard dependency on OmniSharp
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        repo_path = Path(repo_path).resolve()
+
+        # Create RoslynIndexer sharing our storage's database
+        # This ensures data consistency between tree-sitter and Roslyn indexing
+        indexer = RoslynIndexer(db_path=self._db_path)
+
+        # Adapt progress callback if provided
+        roslyn_callback = None
+        if progress_callback:
+            def roslyn_callback(current: int, total: int, message: str) -> None:
+                # Roslyn callback uses 'message' while client uses 'file_path'
+                # We pass the message as-is since it may contain file paths
+                progress_callback(current, total, message)
+
+        # Perform indexing
+        roslyn_result = indexer.index_repo(
+            repo_path,
+            solution_file=solution_file,
+            force=force,
+            progress_callback=roslyn_callback,
+        )
+
+        # Convert RoslynIndexResult to IndexResult for API consistency
+        return IndexResult(
+            files_indexed=roslyn_result.files_indexed,
+            files_failed=roslyn_result.files_failed,
+            nodes_created=roslyn_result.symbols_indexed,
+            edges_created=roslyn_result.usages_indexed,
+            errors=roslyn_result.errors,
+        )
 
     def index_file(
         self,

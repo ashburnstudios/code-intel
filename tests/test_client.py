@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -949,3 +949,165 @@ class TestXamlIntegration:
         assert len(binding_edges) >= 2
         assert any("Title" in e.target_name for e in binding_edges)
         assert any("UserInput" in e.target_name for e in binding_edges)
+
+
+class TestIndexWithRoslyn:
+    """Tests for index_with_roslyn method."""
+
+    def test_index_with_roslyn_delegates_to_roslyn_indexer(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test that index_with_roslyn delegates to RoslynIndexer."""
+        from code_intel.indexer.roslyn import RoslynIndexResult
+
+        # Create a mock result
+        mock_result = RoslynIndexResult(
+            files_indexed=5,
+            files_failed=1,
+            symbols_indexed=100,
+            usages_indexed=50,
+            errors=["test error"],
+        )
+
+        with patch("code_intel.indexer.roslyn.RoslynIndexer") as MockIndexer:
+            mock_indexer = MagicMock()
+            mock_indexer.index_repo.return_value = mock_result
+            MockIndexer.return_value = mock_indexer
+
+            result = client.index_with_roslyn(tmp_path)
+
+            # Verify RoslynIndexer was instantiated with the client's db_path
+            MockIndexer.assert_called_once_with(db_path=client._db_path)
+
+            # Verify index_repo was called with correct params
+            mock_indexer.index_repo.assert_called_once()
+            call_kwargs = mock_indexer.index_repo.call_args
+            assert call_kwargs[1]["force"] is False
+            assert call_kwargs[1]["solution_file"] is None
+
+            # Verify result conversion
+            assert result.files_indexed == 5
+            assert result.files_failed == 1
+            assert result.nodes_created == 100
+            assert result.edges_created == 50
+            assert result.errors == ["test error"]
+
+    def test_index_with_roslyn_with_solution_file(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test index_with_roslyn with explicit solution file."""
+        from code_intel.indexer.roslyn import RoslynIndexResult
+
+        solution_file = tmp_path / "Test.sln"
+        solution_file.write_text("")  # Create empty file
+
+        mock_result = RoslynIndexResult()
+
+        with patch("code_intel.indexer.roslyn.RoslynIndexer") as MockIndexer:
+            mock_indexer = MagicMock()
+            mock_indexer.index_repo.return_value = mock_result
+            MockIndexer.return_value = mock_indexer
+
+            client.index_with_roslyn(tmp_path, solution_file=solution_file)
+
+            # Verify solution_file was passed
+            call_kwargs = mock_indexer.index_repo.call_args
+            assert call_kwargs[1]["solution_file"] == solution_file
+
+    def test_index_with_roslyn_force_flag(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test index_with_roslyn with force=True."""
+        from code_intel.indexer.roslyn import RoslynIndexResult
+
+        mock_result = RoslynIndexResult()
+
+        with patch("code_intel.indexer.roslyn.RoslynIndexer") as MockIndexer:
+            mock_indexer = MagicMock()
+            mock_indexer.index_repo.return_value = mock_result
+            MockIndexer.return_value = mock_indexer
+
+            client.index_with_roslyn(tmp_path, force=True)
+
+            # Verify force was passed
+            call_kwargs = mock_indexer.index_repo.call_args
+            assert call_kwargs[1]["force"] is True
+
+    def test_index_with_roslyn_progress_callback(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test that progress callback is passed to RoslynIndexer."""
+        from code_intel.indexer.roslyn import RoslynIndexResult
+
+        mock_result = RoslynIndexResult()
+        progress_calls: list[tuple[int, int, str]] = []
+
+        def on_progress(current: int, total: int, message: str) -> None:
+            progress_calls.append((current, total, message))
+
+        with patch("code_intel.indexer.roslyn.RoslynIndexer") as MockIndexer:
+            mock_indexer = MagicMock()
+
+            # Simulate the indexer calling the progress callback
+            def mock_index_repo(repo_path, **kwargs):
+                callback = kwargs.get("progress_callback")
+                if callback:
+                    callback(1, 10, "Indexing file1.cs")
+                    callback(2, 10, "Indexing file2.cs")
+                return mock_result
+
+            mock_indexer.index_repo.side_effect = mock_index_repo
+            MockIndexer.return_value = mock_indexer
+
+            client.index_with_roslyn(tmp_path, progress_callback=on_progress)
+
+            # Verify progress callback was invoked
+            assert len(progress_calls) == 2
+            assert progress_calls[0] == (1, 10, "Indexing file1.cs")
+            assert progress_calls[1] == (2, 10, "Indexing file2.cs")
+
+    def test_index_with_roslyn_returns_index_result(
+        self, client: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test that index_with_roslyn returns IndexResult type."""
+        from code_intel.indexer.roslyn import RoslynIndexResult
+
+        mock_result = RoslynIndexResult(
+            files_indexed=3,
+            symbols_indexed=42,
+            usages_indexed=15,
+        )
+
+        with patch("code_intel.indexer.roslyn.RoslynIndexer") as MockIndexer:
+            mock_indexer = MagicMock()
+            mock_indexer.index_repo.return_value = mock_result
+            MockIndexer.return_value = mock_indexer
+
+            result = client.index_with_roslyn(tmp_path)
+
+            # Verify it's an IndexResult (not RoslynIndexResult)
+            assert isinstance(result, IndexResult)
+            assert result.files_indexed == 3
+            assert result.nodes_created == 42  # symbols -> nodes
+            assert result.edges_created == 15  # usages -> edges
+
+    def test_index_with_roslyn_with_persistent_db(
+        self, tmp_path: Path
+    ) -> None:
+        """Test index_with_roslyn shares database with client."""
+        from code_intel.indexer.roslyn import RoslynIndexResult
+
+        db_path = tmp_path / "test.db"
+        client = CodeIntelClient(db_path)
+
+        mock_result = RoslynIndexResult()
+
+        with patch("code_intel.indexer.roslyn.RoslynIndexer") as MockIndexer:
+            mock_indexer = MagicMock()
+            mock_indexer.index_repo.return_value = mock_result
+            MockIndexer.return_value = mock_indexer
+
+            client.index_with_roslyn(tmp_path)
+
+            # Verify RoslynIndexer was created with client's db_path
+            MockIndexer.assert_called_once_with(db_path=db_path)
