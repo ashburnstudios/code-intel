@@ -10,7 +10,11 @@ from code_intel.graph.schema import (
     NodeKind,
 )
 from code_intel.graph.storage import GraphStorage
-from code_intel.indexer.roslyn import RoslynIndexer, RoslynIndexResult
+from code_intel.indexer.roslyn import (
+    RoslynIndexer,
+    RoslynIndexResult,
+    RoslynProgressCallback,
+)
 from code_intel.lsp.omnisharp import (
     OmniSharpError,
     OmniSharpNotFoundError,
@@ -46,6 +50,7 @@ __all__ = [
     # Indexer (LSP-based)
     "RoslynIndexer",
     "RoslynIndexResult",
+    "RoslynProgressCallback",
     # LSP
     "OmniSharpServer",
     "OmniSharpError",

@@ -4,13 +4,18 @@ These tests require OmniSharp to be installed. They will be skipped if
 OmniSharp is not available.
 """
 
+from __future__ import annotations
+
 import shutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from code_intel.graph.schema import EdgeKind, NodeKind
-from code_intel.graph.storage import GraphStorage
+from code_intel.graph.schema import NodeKind
+
+if TYPE_CHECKING:
+    from code_intel.indexer.roslyn import RoslynIndexer
 
 
 def _check_omnisharp_available() -> bool:
@@ -227,8 +232,8 @@ class TestRoslynIndexerIntegration:
             pytest.skip("SimpleClass.cs not found")
 
         with OmniSharpServer(sample_csproj, timeout=120.0) as server:
-            # First get structure to find a method position
-            structure = server.get_code_structure(simple_class)
+            # First get structure to verify connection works
+            _ = server.get_code_structure(simple_class)
 
             # Find PublicMethod position (this is approximate)
             # In real usage, we'd get the exact position from codestructure
@@ -242,9 +247,8 @@ class TestRoslynIndexerIntegration:
                     break
 
             if method_line is not None:
-                usages = server.find_usages(simple_class, method_line, 16)
-                # Method should be called from somewhere
-                # May or may not find usages depending on OmniSharp loading
+                # Query usages - may or may not find results depending on OmniSharp loading
+                _ = server.find_usages(simple_class, method_line, 16)
 
     def test_index_delegates_and_events(
         self, indexer: "RoslynIndexer", sample_csproj: Path
