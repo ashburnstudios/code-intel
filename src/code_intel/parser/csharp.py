@@ -1,5 +1,6 @@
 """C# parser using Tree-sitter for AST analysis."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from code_intel.parser.base import BaseParser
@@ -716,7 +717,7 @@ class CSharpParser(BaseParser):
 
                 symbols.append(symbol)
 
-    def extract_references(self, tree: "Tree", source: bytes) -> list[dict]:
+    def extract_references(self, tree: "Tree", source: bytes, file_path: "Path | str | None" = None) -> list[dict]:
         """Extract symbol references from C# AST.
 
         Extracts:
@@ -727,6 +728,7 @@ class CSharpParser(BaseParser):
         Args:
             tree: Parsed tree-sitter Tree.
             source: Original source bytes.
+            file_path: Optional path to the source file (unused in C# parser).
 
         Returns:
             List of reference dictionaries.

@@ -17,7 +17,7 @@ from code_intel.graph.schema import (
 from code_intel.graph.storage import GraphStorage
 
 if TYPE_CHECKING:
-    from code_intel.parser.base import BaseParser, ParseResult
+    from code_intel.parser.base import BaseParser
 
 logger = logging.getLogger(__name__)
 
@@ -637,11 +637,13 @@ class CodeIntelClient:
                     parsed_edge.source_name, file_path_str, repo_path
                 )
 
-            # Resolve target node ID
+            # Resolve target node ID using target_module hint if available
             target_id = node_id_map.get(parsed_edge.target_name)
             if not target_id:
+                target_module = parsed_edge.metadata.get("target_module")
                 target_id = self._find_node_id_by_name(
-                    parsed_edge.target_name, file_path_str, repo_path
+                    parsed_edge.target_name, file_path_str, repo_path,
+                    target_module=target_module
                 )
 
             # Skip edges where we can't resolve both ends
@@ -682,10 +684,27 @@ class CodeIntelClient:
         name: str,
         file_path: str,
         repo_path: str,
+        *,
+        target_module: str | None = None,
     ) -> str | None:
-        """Find a node ID by name, searching current file first then repo.
+        """Find a node ID by name, with optional module hint for cross-file resolution.
+
+        Search priority:
+        1. If target_module is provided, search that specific module/file first
+        2. Search in current file
+        3. Fall back to repo-wide search (returns first match if unique)
 
         Special handling for <module> which represents the current file/module.
+
+        Args:
+            name: The symbol name to find.
+            file_path: Current file path for same-file resolution.
+            repo_path: Repository root path for scoping.
+            target_module: Optional module path hint (e.g., 'foundry.jira') for
+                          cross-file symbol resolution. Converted to file path.
+
+        Returns:
+            Node ID if found, None otherwise.
         """
         # Handle special <module> placeholder
         if name == "<module>":
@@ -698,6 +717,18 @@ class CodeIntelClient:
             # (Cannot use synthetic ID as it would violate FK constraint)
             return None
 
+        # If we have a target_module hint, try to resolve via that file first
+        if target_module:
+            target_file_path = self._module_to_file_path(target_module, repo_path)
+            if target_file_path:
+                nodes = self._storage.get_nodes_by_file(target_file_path, repo_path)
+                for node in nodes:
+                    if node.name == name or node.qualified_name == name:
+                        return node.id
+                    # Also check for qualified names like ClassName.method
+                    if node.qualified_name and node.qualified_name.endswith(f".{name}"):
+                        return node.id
+
         # Search in current file first
         nodes = self._storage.get_nodes_by_file(file_path, repo_path)
         for node in nodes:
@@ -707,7 +738,64 @@ class CodeIntelClient:
         # Search in entire repo
         nodes = self._storage.get_nodes_by_name(name, repo_path)
         if nodes:
+            # If there's only one match, return it
+            # If there are multiple and no module hint, we can't disambiguate
+            if len(nodes) == 1:
+                return nodes[0].id
+            # Multiple matches without hint - best effort: return first
+            # A future enhancement could rank by proximity or frequency
             return nodes[0].id
+
+        return None
+
+    def _module_to_file_path(self, module_path: str, repo_path: str) -> str | None:
+        """Convert a Python module path to a file system path.
+
+        Tries multiple resolution strategies:
+        1. Direct module path to .py file (foundry.jira -> foundry/jira.py)
+        2. Package __init__.py (foundry.jira -> foundry/jira/__init__.py)
+        3. src/ prefix variation (src/foundry/jira.py)
+
+        Args:
+            module_path: Dotted module path (e.g., 'foundry.jira').
+            repo_path: Repository root path.
+
+        Returns:
+            Absolute file path if found, None otherwise.
+        """
+        if not module_path:
+            return None
+
+        repo = Path(repo_path)
+        parts = module_path.split(".")
+
+        # Try direct .py file
+        candidate = repo / "/".join(parts[:-1]) / f"{parts[-1]}.py" if len(parts) > 1 else repo / f"{parts[0]}.py"
+        if candidate.exists():
+            return str(candidate)
+
+        # Try full path as .py
+        full_path = repo / ("/".join(parts) + ".py")
+        if full_path.exists():
+            return str(full_path)
+
+        # Try as package __init__.py
+        package_init = repo / "/".join(parts) / "__init__.py"
+        if package_init.exists():
+            return str(package_init)
+
+        # Try with src/ prefix
+        src_direct = repo / "src" / "/".join(parts[:-1]) / f"{parts[-1]}.py" if len(parts) > 1 else repo / "src" / f"{parts[0]}.py"
+        if src_direct.exists():
+            return str(src_direct)
+
+        src_full = repo / "src" / ("/".join(parts) + ".py")
+        if src_full.exists():
+            return str(src_full)
+
+        src_init = repo / "src" / "/".join(parts) / "__init__.py"
+        if src_init.exists():
+            return str(src_init)
 
         return None
 
