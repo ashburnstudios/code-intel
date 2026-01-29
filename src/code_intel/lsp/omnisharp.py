@@ -2,8 +2,9 @@
 
 This module provides a process manager for OmniSharp-Roslyn that handles:
 - Starting and stopping the OmniSharp process
-- Stdio transport communication (Content-Length protocol)
+- Stdio transport communication (JSON lines protocol)
 - Request/response matching via sequence numbers
+- Waiting for solution projects to fully load before queries
 - Querying /v2/codestructure and /findusages endpoints
 """
 
@@ -12,9 +13,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +86,7 @@ class OmniSharpServer:
         solution_path: str | Path,
         omnisharp_path: str | Path | None = None,
         timeout: float = 60.0,
+        project_load_timeout: float = 120.0,
     ):
         """Initialise OmniSharp server wrapper.
 
@@ -90,9 +94,12 @@ class OmniSharpServer:
             solution_path: Path to .sln file or directory containing .csproj files.
             omnisharp_path: Path to OmniSharp executable. If None, searches common paths.
             timeout: Default timeout for requests in seconds.
+            project_load_timeout: Timeout for waiting for all projects to load in seconds.
+                                  Set to 0 to skip waiting for projects.
         """
         self.solution_path = Path(solution_path).resolve()
         self.timeout = timeout
+        self.project_load_timeout = project_load_timeout
         self._seq = 0
         self._seq_lock = threading.Lock()
         self._process: subprocess.Popen | None = None
@@ -101,6 +108,11 @@ class OmniSharpServer:
         self._reader_thread: threading.Thread | None = None
         self._running = False
         self._read_lock = threading.Lock()
+
+        # Project loading state
+        self._projects_loaded: set[str] = set()
+        self._projects_loaded_event = threading.Event()
+        self._expected_project_count: int | None = None
 
         # Find OmniSharp executable
         if omnisharp_path:
@@ -154,8 +166,52 @@ class OmniSharpServer:
             self._seq += 1
             return self._seq
 
+    def _count_solution_projects(self) -> int:
+        """Count the number of projects in the solution file.
+
+        Parses the .sln file to count Project entries. If the solution_path
+        is a .csproj file or directory, returns 1 as we expect a single project.
+
+        Returns:
+            Number of expected projects in the solution.
+        """
+        if not self.solution_path.suffix.lower() == ".sln":
+            # Single .csproj or directory - expect 1 project
+            return 1
+
+        if not self.solution_path.exists():
+            logger.warning("Solution file not found: %s", self.solution_path)
+            return 0
+
+        try:
+            content = self.solution_path.read_text(encoding="utf-8-sig")
+
+            # Match Project lines in .sln file
+            # Format: Project("{GUID}") = "Name", "Path.csproj", "{GUID}"
+            # We look for .csproj, .fsproj, .vbproj extensions
+            project_pattern = re.compile(
+                r'^Project\s*\(\s*"\{[^}]+\}"\s*\)\s*=\s*"[^"]+"\s*,\s*"([^"]+\.(csproj|fsproj|vbproj))"',
+                re.MULTILINE | re.IGNORECASE,
+            )
+
+            projects = project_pattern.findall(content)
+            count = len(projects)
+
+            logger.debug(
+                "Found %d projects in solution %s", count, self.solution_path.name
+            )
+            return count
+
+        except OSError as e:
+            logger.warning("Failed to read solution file: %s", e)
+            return 0
+
     def start(self) -> None:
         """Start the OmniSharp server process.
+
+        Waits for the server to become responsive (via /checkalivestatus) and then
+        waits for all solution projects to finish loading before returning. This
+        ensures that queries like /findusages will return complete results.
 
         Raises:
             OmniSharpError: If the server fails to start.
@@ -163,6 +219,11 @@ class OmniSharpServer:
         if self._process is not None:
             logger.warning("OmniSharp server already running")
             return
+
+        # Reset project loading state
+        self._projects_loaded.clear()
+        self._projects_loaded_event.clear()
+        self._expected_project_count = self._count_solution_projects()
 
         cmd = [
             str(self.omnisharp_path),
@@ -174,6 +235,10 @@ class OmniSharpServer:
         ]
 
         logger.info("Starting OmniSharp: %s", " ".join(cmd))
+        logger.info(
+            "Expecting %d projects to load from solution",
+            self._expected_project_count,
+        )
 
         try:
             self._process = subprocess.Popen(
@@ -194,13 +259,23 @@ class OmniSharpServer:
         )
         self._reader_thread.start()
 
-        # Wait for server to be ready (it sends an event when ready)
+        # Wait for server to be ready (responds to /checkalivestatus)
         logger.info("Waiting for OmniSharp to initialise...")
         self._wait_for_ready()
-        logger.info("OmniSharp server ready")
+        logger.info("OmniSharp server alive")
+
+        # Wait for all projects to load (tracks ProjectAdded events)
+        if self.project_load_timeout > 0 and self._expected_project_count > 0:
+            self._wait_for_projects_loaded()
+
+        logger.info("OmniSharp server ready with %d projects", len(self._projects_loaded))
 
     def _wait_for_ready(self, timeout: float = 120.0) -> None:
-        """Wait for OmniSharp to finish loading the solution.
+        """Wait for OmniSharp to respond to requests.
+
+        This only checks that the server is alive and accepting requests.
+        It does NOT wait for projects to finish loading - use _wait_for_projects_loaded()
+        for that.
 
         Args:
             timeout: Maximum time to wait in seconds.
@@ -208,8 +283,6 @@ class OmniSharpServer:
         Raises:
             OmniSharpTimeoutError: If server doesn't become ready in time.
         """
-        import time
-
         start = time.time()
         while time.time() - start < timeout:
             if not self._running:
@@ -229,6 +302,72 @@ class OmniSharpServer:
         raise OmniSharpTimeoutError(
             f"OmniSharp server did not become ready within {timeout} seconds"
         )
+
+    def _wait_for_projects_loaded(self) -> None:
+        """Wait for all projects in the solution to finish loading.
+
+        Monitors ProjectAdded events from OmniSharp and waits until the expected
+        number of projects have loaded, or until the timeout is reached.
+
+        For large solutions (e.g., PLOD with ~800 files), project loading can take
+        20-30 seconds after the server responds to /checkalivestatus.
+        """
+        if self._expected_project_count is None or self._expected_project_count <= 0:
+            logger.debug("No expected projects, skipping wait")
+            return
+
+        logger.info(
+            "Waiting for %d projects to load (timeout: %.1fs)...",
+            self._expected_project_count,
+            self.project_load_timeout,
+        )
+
+        start = time.time()
+
+        while time.time() - start < self.project_load_timeout:
+            if not self._running:
+                raise OmniSharpError("OmniSharp process terminated unexpectedly")
+
+            loaded_count = len(self._projects_loaded)
+            if loaded_count >= self._expected_project_count:
+                elapsed = time.time() - start
+                logger.info(
+                    "All %d projects loaded in %.1f seconds",
+                    loaded_count,
+                    elapsed,
+                )
+                return
+
+            # Wait for the event with a short timeout to allow periodic logging
+            if self._projects_loaded_event.wait(timeout=5.0):
+                # Event was set, check if we have all projects
+                self._projects_loaded_event.clear()
+                continue
+
+            # Log progress periodically
+            elapsed = time.time() - start
+            logger.debug(
+                "Loaded %d/%d projects (%.1fs elapsed)",
+                loaded_count,
+                self._expected_project_count,
+                elapsed,
+            )
+
+        # Timeout reached
+        loaded_count = len(self._projects_loaded)
+        if loaded_count < self._expected_project_count:
+            logger.warning(
+                "Timeout waiting for projects: loaded %d/%d after %.1f seconds. "
+                "Proceeding anyway - some queries may return incomplete results.",
+                loaded_count,
+                self._expected_project_count,
+                self.project_load_timeout,
+            )
+        else:
+            logger.info(
+                "All %d projects loaded (timeout check passed)",
+                loaded_count,
+            )
 
     def stop(self) -> None:
         """Stop the OmniSharp server process."""
@@ -273,6 +412,62 @@ class OmniSharpServer:
         """Context manager exit - stop server."""
         self.stop()
 
+    def _handle_event(self, event_name: str, body: dict[str, Any]) -> None:
+        """Handle an OmniSharp event.
+
+        Tracks ProjectAdded events to monitor solution loading progress.
+
+        Args:
+            event_name: Name of the event (e.g., "ProjectAdded", "MsBuildProjectDiagnostics").
+            body: Event body containing event-specific data.
+        """
+        if event_name == "ProjectAdded":
+            # Extract project path from the event body
+            # OmniSharp sends: {"MsBuildProject": {"Path": "...", "AssemblyName": "..."}}
+            # or directly: {"Path": "...", "AssemblyName": "..."}
+            project_info = body.get("MsBuildProject", body)
+            project_path = project_info.get("Path", project_info.get("path", ""))
+
+            if project_path:
+                with self._read_lock:
+                    if project_path not in self._projects_loaded:
+                        self._projects_loaded.add(project_path)
+                        logger.debug(
+                            "Project loaded (%d/%s): %s",
+                            len(self._projects_loaded),
+                            self._expected_project_count or "?",
+                            Path(project_path).name,
+                        )
+                        # Signal that a project was loaded
+                        self._projects_loaded_event.set()
+            else:
+                logger.debug("ProjectAdded event without path: %s", body)
+
+        elif event_name == "MsBuildProjectDiagnostics":
+            # Log any MSBuild diagnostics (warnings/errors during project load)
+            file_path = body.get("FileName", body.get("fileName", ""))
+            diagnostics = body.get("Diagnostics", body.get("diagnostics", []))
+            if diagnostics:
+                for diag in diagnostics[:3]:  # Limit logging
+                    severity = diag.get("LogLevel", diag.get("logLevel", ""))
+                    message = diag.get("Message", diag.get("message", ""))
+                    if severity.lower() == "error":
+                        logger.warning(
+                            "MSBuild error in %s: %s", Path(file_path).name, message
+                        )
+
+        elif event_name in ("log", "Log"):
+            # Standard log event
+            log_level = body.get("LogLevel", body.get("logLevel", ""))
+            message = body.get("Message", body.get("message", ""))
+            if log_level.lower() == "error":
+                logger.error("OmniSharp: %s", message)
+            else:
+                logger.debug("OmniSharp %s: %s", log_level, message[:200] if message else "")
+
+        else:
+            logger.debug("OmniSharp event: %s", event_name)
+
     def _read_responses(self) -> None:
         """Background thread to read responses from OmniSharp stdout.
 
@@ -311,9 +506,8 @@ class OmniSharpServer:
                 msg_type = data.get("Type", data.get("type", ""))
 
                 if msg_type == "event":
-                    # Log events but don't process them
                     event_name = data.get("Event", data.get("event", ""))
-                    logger.debug("OmniSharp event: %s", event_name)
+                    self._handle_event(event_name, data.get("Body", {}))
                     continue
 
                 if msg_type == "response":
