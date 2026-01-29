@@ -800,3 +800,152 @@ class TestClientInternalMethods:
 
         names = [f.name for f in files]
         assert names == sorted(names)
+
+
+class TestXamlIntegration:
+    """Tests for XAML parser integration with CodeIntelClient."""
+
+    @pytest.fixture
+    def xaml_parser(self):
+        """Get an XAML parser instance."""
+        from code_intel.parser.xaml import XamlParser
+        return XamlParser()
+
+    @pytest.fixture
+    def client_with_xaml(self, client: CodeIntelClient, xaml_parser) -> CodeIntelClient:
+        """Create a client with XAML parser registered."""
+        client.register_parser(xaml_parser)
+        return client
+
+    def test_infer_language_xaml_with_registered_parser(
+        self, client_with_xaml: CodeIntelClient
+    ) -> None:
+        """Test language inference for XAML files when parser is registered."""
+        from pathlib import Path
+        # XAML is not in the hardcoded map, but should be found via registered parser
+        assert client_with_xaml._infer_language(Path("MainPage.xaml")) == "xaml"
+        assert client_with_xaml._infer_language(Path("App.XAML")) == "xaml"
+
+    def test_infer_language_xaml_without_parser_raises(
+        self, client: CodeIntelClient
+    ) -> None:
+        """Test that XAML inference fails when no parser is registered."""
+        from pathlib import Path
+        with pytest.raises(ValueError, match="Cannot infer language"):
+            client._infer_language(Path("MainPage.xaml"))
+
+    def test_map_node_kind_xaml_types(self, client: CodeIntelClient) -> None:
+        """Test mapping XAML-specific node types."""
+        assert client._map_node_kind("page") == NodeKind.CLASS
+        assert client._map_node_kind("named_element") == NodeKind.VARIABLE
+        assert client._map_node_kind("resource") == NodeKind.CONSTANT
+
+    def test_map_edge_kind_xaml_types(self, client: CodeIntelClient) -> None:
+        """Test mapping XAML-specific edge types."""
+        assert client._map_edge_kind("event_handler") == EdgeKind.CALLS
+        assert client._map_edge_kind("binding") == EdgeKind.REFERENCES
+        assert client._map_edge_kind("command") == EdgeKind.CALLS
+        assert client._map_edge_kind("resource_ref") == EdgeKind.REFERENCES
+        assert client._map_edge_kind("template_binding") == EdgeKind.REFERENCES
+
+    def test_index_xaml_file(
+        self, client_with_xaml: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test indexing a single XAML file."""
+        xaml_content = '''<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="MyApp.Views.MainPage">
+    <StackLayout>
+        <Button x:Name="SubmitButton" Text="Submit" Clicked="OnSubmitClicked" />
+        <Label Text="{Binding UserName}" />
+    </StackLayout>
+</ContentPage>
+'''
+        xaml_file = tmp_path / "MainPage.xaml"
+        xaml_file.write_text(xaml_content)
+
+        result = client_with_xaml.index_file(xaml_file, tmp_path)
+
+        assert result.files_indexed == 0  # index_file increments on parent call
+        assert result.nodes_created >= 2  # page + named element
+        # Note: Edges to code-behind (event handlers, bindings) won't be created
+        # until the C# code-behind file is also indexed, because edges require
+        # both source and target nodes to exist in the graph.
+
+    def test_index_repo_with_xaml(
+        self, client_with_xaml: CodeIntelClient, tmp_path: Path
+    ) -> None:
+        """Test indexing a repository containing XAML files."""
+        # Create a simple XAML file
+        xaml_content = '''<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="MyApp.Views.HomePage">
+    <Button x:Name="LoginButton" Clicked="OnLoginClicked" />
+</ContentPage>
+'''
+        views_dir = tmp_path / "Views"
+        views_dir.mkdir()
+        (views_dir / "HomePage.xaml").write_text(xaml_content)
+
+        result = client_with_xaml.index_repo(tmp_path)
+
+        assert result.files_indexed == 1
+        assert result.nodes_created >= 2  # page + named element
+        # Edges to code-behind won't be stored without the C# file
+
+    def test_xaml_parser_produces_edges(
+        self, xaml_parser, tmp_path: Path
+    ) -> None:
+        """Test that XAML parser produces event handler and binding edges.
+
+        Note: These edges may not be stored in the graph if the target
+        code-behind file hasn't been indexed yet, but the parser should
+        still produce them.
+        """
+        from code_intel.parser.xaml import XamlParser
+
+        xaml_content = '''<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="TestApp.TestPage">
+    <Button Clicked="OnButtonClicked" />
+    <Entry TextChanged="OnTextChanged" />
+</ContentPage>
+'''
+        xaml_file = tmp_path / "TestPage.xaml"
+        xaml_file.write_text(xaml_content)
+
+        result = xaml_parser.parse_to_result(xaml_file)
+
+        # Parser should produce edges for event handlers
+        event_handler_edges = [e for e in result.edges if e.edge_type == "event_handler"]
+        assert len(event_handler_edges) >= 2
+        assert any("OnButtonClicked" in e.target_name for e in event_handler_edges)
+        assert any("OnTextChanged" in e.target_name for e in event_handler_edges)
+
+    def test_xaml_parser_produces_binding_edges(
+        self, xaml_parser, tmp_path: Path
+    ) -> None:
+        """Test that XAML parser produces binding edges."""
+        from code_intel.parser.xaml import XamlParser
+
+        xaml_content = '''<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="TestApp.BindingPage">
+    <Label Text="{Binding Title}" />
+    <Entry Text="{Binding UserInput, Mode=TwoWay}" />
+</ContentPage>
+'''
+        xaml_file = tmp_path / "BindingPage.xaml"
+        xaml_file.write_text(xaml_content)
+
+        result = xaml_parser.parse_to_result(xaml_file)
+
+        # Parser should produce edges for bindings
+        binding_edges = [e for e in result.edges if e.edge_type == "binding"]
+        assert len(binding_edges) >= 2
+        assert any("Title" in e.target_name for e in binding_edges)
+        assert any("UserInput" in e.target_name for e in binding_edges)

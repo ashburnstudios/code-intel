@@ -647,6 +647,10 @@ class CodeIntelClient:
             "enum_member": NodeKind.ENUM_MEMBER,
             "import": NodeKind.IMPORT,
             "decorator": NodeKind.DECORATOR,
+            # XAML node types
+            "page": NodeKind.CLASS,  # XAML page (x:Class)
+            "named_element": NodeKind.VARIABLE,  # XAML named element (x:Name)
+            "resource": NodeKind.CONSTANT,  # XAML resource (x:Key)
         }
         return mapping.get(kind_str.lower(), NodeKind.VARIABLE)
 
@@ -663,11 +667,20 @@ class CodeIntelClient:
             "returns": EdgeKind.RETURNS,
             "parameter_type": EdgeKind.PARAMETER_TYPE,
             "type_of": EdgeKind.TYPE_OF,
+            # XAML edge types (all map to CALLS or REFERENCES)
+            "event_handler": EdgeKind.CALLS,  # XAML event -> handler method
+            "binding": EdgeKind.REFERENCES,  # XAML binding expression
+            "command": EdgeKind.CALLS,  # XAML command binding
+            "resource_ref": EdgeKind.REFERENCES,  # StaticResource/DynamicResource
+            "template_binding": EdgeKind.REFERENCES,  # TemplateBinding
         }
         return mapping.get(kind_str.lower(), EdgeKind.REFERENCES)
 
     def _infer_language(self, path: Path) -> str:
         """Infer language from file extension.
+
+        First checks a built-in map for common languages, then falls back
+        to checking registered parsers' file extensions.
 
         Args:
             path: File path.
@@ -678,6 +691,7 @@ class CodeIntelClient:
         Raises:
             ValueError: If language cannot be inferred.
         """
+        # Built-in extension map for common languages
         extension_map = {
             ".py": "python",
             ".pyi": "python",
@@ -688,7 +702,16 @@ class CodeIntelClient:
             ".cs": "csharp",
         }
 
-        language = extension_map.get(path.suffix.lower())
+        ext = path.suffix.lower()
+        language = extension_map.get(ext)
+
+        # Fallback: check registered parsers' file extensions
+        if language is None:
+            for parser_lang, parser in self._parsers.items():
+                if ext in parser.file_extensions:
+                    language = parser_lang
+                    break
+
         if language is None:
             raise ValueError(f"Cannot infer language for extension: {path.suffix}")
 
