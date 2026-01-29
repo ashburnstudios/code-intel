@@ -58,6 +58,10 @@ all-languages = [
     "tree-sitter-python>=0.21.0",
     "tree-sitter-c-sharp>=0.21.0",
 ]
+# LSP-based semantic indexing (requires external OmniSharp installation)
+# Install OmniSharp via: dotnet tool install -g omnisharp
+# or VS Code C# extension
+lsp = []  # No Python deps, but marker for OmniSharp-based features
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
