@@ -205,7 +205,9 @@ class RoslynIndexer:
                         "Finding usages for all symbols...",
                     )
 
-                usages_count = self._index_all_usages(server, repo_path)
+                usages_count = self._index_all_usages(
+                    server, repo_path, progress_callback
+                )
                 result.usages_indexed = usages_count
 
         except OmniSharpError as e:
@@ -354,36 +356,61 @@ class RoslynIndexer:
             end_column=end_column,
         )
 
+    # Map symbol kinds to the appropriate edge type for usages
+    USAGE_EDGE_KIND_MAP = {
+        # Callable symbols - use CALLS
+        NodeKind.METHOD: EdgeKind.CALLS,
+        NodeKind.FUNCTION: EdgeKind.CALLS,
+        NodeKind.PROPERTY: EdgeKind.CALLS,  # Property accessors are effectively calls
+        # Type symbols - use REFERENCES (instantiation, type params, etc.)
+        NodeKind.CLASS: EdgeKind.REFERENCES,
+        NodeKind.INTERFACE: EdgeKind.REFERENCES,
+        NodeKind.ENUM: EdgeKind.REFERENCES,
+        # Value symbols - use REFERENCES
+        NodeKind.VARIABLE: EdgeKind.REFERENCES,  # Fields
+        NodeKind.CONSTANT: EdgeKind.REFERENCES,
+        NodeKind.ENUM_MEMBER: EdgeKind.REFERENCES,
+    }
+
     def _index_all_usages(
         self,
         server: OmniSharpServer,
         repo_path: str,
+        progress_callback: RoslynProgressCallback | None = None,
     ) -> int:
-        """Index usages for all symbols in the repository.
+        """Index usages for all referenceable symbols in the repository.
 
-        For each callable symbol (method, property, event), queries OmniSharp
-        to find all usages and creates CALLS edges.
+        For each symbol, queries OmniSharp to find all usages and creates
+        appropriate edges (CALLS for methods, REFERENCES for types/fields).
 
         Args:
             server: OmniSharp server instance.
             repo_path: Repository root path.
+            progress_callback: Optional callback for progress updates.
 
         Returns:
             Number of edges created.
         """
-        # Get all nodes that could be called (methods, properties, events)
-        callable_kinds = [
-            NodeKind.METHOD,
-            NodeKind.PROPERTY,
-            NodeKind.FUNCTION,
-        ]
+        # Query usages for all referenceable symbol kinds
+        referenceable_kinds = set(self.USAGE_EDGE_KIND_MAP.keys())
 
         edges_created = 0
         all_nodes = self._storage.get_all_nodes(repo_path)
 
-        for node in all_nodes:
-            if node.kind not in callable_kinds:
-                continue
+        # Filter to referenceable nodes (skip modules, imports, etc.)
+        target_nodes = [n for n in all_nodes if n.kind in referenceable_kinds]
+        total_nodes = len(target_nodes)
+
+        logger.info("Finding usages for %d symbols...", total_nodes)
+
+        for idx, node in enumerate(target_nodes):
+            if progress_callback and idx % 100 == 0:
+                progress_callback(
+                    idx, total_nodes, f"Finding usages: {node.name}"
+                )
+
+            # Determine edge kind based on symbol type
+            edge_kind = self.USAGE_EDGE_KIND_MAP.get(node.kind, EdgeKind.REFERENCES)
 
             # Query OmniSharp for usages
             try:
@@ -409,7 +436,7 @@ class RoslynIndexer:
                         edge = GraphEdge(
                             source_id=caller_node.id,
                             target_id=node.id,
-                            kind=EdgeKind.CALLS,
+                            kind=edge_kind,
                             location=Location(
                                 file_path=usage.file_name,
                                 start_line=usage.line + 1,
