@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from code_intel.graph.schema import (
     EdgeKind,
@@ -468,6 +468,144 @@ class RoslynIndexer:
                     best_node = node
 
         return best_node
+
+    def index_repo(
+        self,
+        repo_path: Path | str,
+        *,
+        solution_file: Path | str | None = None,
+        force: bool = False,
+        progress_callback: RoslynProgressCallback | None = None,
+    ) -> RoslynIndexResult:
+        """Index a C# repository using OmniSharp.
+
+        This method provides a repository-centric interface for indexing. If no
+        solution file is specified, it will auto-discover .sln files in the
+        repository, preferring those at the root level.
+
+        Args:
+            repo_path: Path to the repository root directory.
+            solution_file: Optional path to .sln or .csproj file. If None,
+                          auto-discovers solution files in the repository.
+            force: If True, re-index even if already indexed (clears existing data).
+            progress_callback: Optional callback for progress updates.
+                              Called with (current, total, message).
+
+        Returns:
+            RoslynIndexResult with indexing statistics.
+
+        Raises:
+            ValueError: If no solution file is found and none was provided.
+        """
+        repo_path = Path(repo_path).resolve()
+        result = RoslynIndexResult()
+
+        if not repo_path.is_dir():
+            result.errors.append(f"Repository path is not a directory: {repo_path}")
+            return result
+
+        # Resolve solution file
+        if solution_file is not None:
+            solution_path = Path(solution_file).resolve()
+            if not solution_path.exists():
+                result.errors.append(f"Solution file not found: {solution_path}")
+                return result
+        else:
+            # Auto-discover solution file
+            solution_path = self._discover_solution(repo_path)
+            if solution_path is None:
+                result.errors.append(
+                    f"No .sln or .csproj file found in repository: {repo_path}"
+                )
+                return result
+            logger.info("Auto-discovered solution: %s", solution_path)
+
+        # Delegate to index_solution
+        return self.index_solution(
+            solution_path,
+            force=force,
+            progress_callback=progress_callback,
+        )
+
+    def _discover_solution(self, repo_path: Path) -> Path | None:
+        """Discover a solution file in the repository.
+
+        Searches for .sln files, preferring those at the root level.
+        Falls back to .csproj files if no .sln is found.
+
+        Args:
+            repo_path: Path to the repository root.
+
+        Returns:
+            Path to the discovered solution file, or None if not found.
+        """
+        # First, look for .sln files at root level
+        root_sln_files = list(repo_path.glob("*.sln"))
+        if root_sln_files:
+            # If multiple, prefer the one matching the directory name
+            repo_name = repo_path.name.lower()
+            for sln in root_sln_files:
+                if sln.stem.lower() == repo_name:
+                    return sln
+            # Otherwise return the first one (alphabetically for consistency)
+            return sorted(root_sln_files)[0]
+
+        # Look for .sln files in subdirectories (one level deep)
+        subdir_sln_files = list(repo_path.glob("*/*.sln"))
+        if subdir_sln_files:
+            return sorted(subdir_sln_files)[0]
+
+        # Look for .sln files anywhere (recursive, but limit depth)
+        all_sln_files = self._find_files_limited_depth(repo_path, "*.sln", max_depth=3)
+        if all_sln_files:
+            return sorted(all_sln_files)[0]
+
+        # Fall back to .csproj files
+        root_csproj_files = list(repo_path.glob("*.csproj"))
+        if root_csproj_files:
+            return sorted(root_csproj_files)[0]
+
+        subdir_csproj_files = list(repo_path.glob("*/*.csproj"))
+        if subdir_csproj_files:
+            return sorted(subdir_csproj_files)[0]
+
+        all_csproj_files = self._find_files_limited_depth(
+            repo_path, "*.csproj", max_depth=3
+        )
+        if all_csproj_files:
+            return sorted(all_csproj_files)[0]
+
+        return None
+
+    def _find_files_limited_depth(
+        self, root: Path, pattern: str, max_depth: int
+    ) -> Sequence[Path]:
+        """Find files matching pattern up to a maximum depth.
+
+        Args:
+            root: Root directory to search from.
+            pattern: Glob pattern for filename (e.g., "*.sln").
+            max_depth: Maximum directory depth to search.
+
+        Returns:
+            List of matching file paths.
+        """
+        results: list[Path] = []
+
+        def search(current: Path, depth: int) -> None:
+            if depth > max_depth:
+                return
+            try:
+                for item in current.iterdir():
+                    if item.is_file() and item.match(pattern):
+                        results.append(item)
+                    elif item.is_dir() and not item.name.startswith("."):
+                        search(item, depth + 1)
+            except PermissionError:
+                pass
+
+        search(root, 0)
+        return results
 
     def clear_repository(self, repo_path: Path | str) -> int:
         """Clear all indexed data for a repository.
