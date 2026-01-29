@@ -14,15 +14,19 @@ from pydantic import BaseModel, Field
 class Point(BaseModel):
     """A point in a source file (line and column)."""
 
-    line: int = Field(description="0-indexed line number")
-    column: int = Field(description="0-indexed column number")
+    line: int = Field(alias="Line", description="0-indexed line number")
+    column: int = Field(alias="Column", description="0-indexed column number")
+
+    model_config = {"populate_by_name": True}
 
 
 class Range(BaseModel):
     """A range in a source file (start and end points)."""
 
-    start: Point
-    end: Point
+    start: Point = Field(alias="Start")
+    end: Point = Field(alias="End")
+
+    model_config = {"populate_by_name": True}
 
 
 class Location(BaseModel):
@@ -165,8 +169,8 @@ class OmniSharpResponse(BaseModel):
     message: str | None = Field(
         default=None, alias="Message", description="Error message if failed"
     )
-    body: dict[str, Any] | None = Field(
-        default=None, alias="Body", description="Response payload"
+    body: Any = Field(
+        default=None, alias="Body", description="Response payload (type varies by endpoint)"
     )
     type_: str = Field(alias="Type", description="Response type")
 

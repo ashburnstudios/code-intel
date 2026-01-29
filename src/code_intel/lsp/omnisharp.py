@@ -217,7 +217,7 @@ class OmniSharpServer:
             # OmniSharp is ready when we can successfully send a request
             try:
                 # Send a simple request to check if server is ready
-                self._send_request("/checkreadystatus", {}, timeout=5.0)
+                self._send_request("/checkalivestatus", {}, timeout=5.0)
                 return
             except OmniSharpTimeoutError:
                 time.sleep(1.0)
@@ -274,66 +274,37 @@ class OmniSharpServer:
         self.stop()
 
     def _read_responses(self) -> None:
-        """Background thread to read responses from OmniSharp stdout."""
+        """Background thread to read responses from OmniSharp stdout.
+
+        OmniSharp --stdio mode uses newline-delimited JSON (JSON lines),
+        not the LSP Content-Length protocol.
+        """
         if not self._process or not self._process.stdout:
             return
 
-        stdout = self._process.stdout
-        buffer = b""
+        import io
+
+        # Wrap stdout in a text reader for line-based reading
+        stdout = io.TextIOWrapper(self._process.stdout, encoding="utf-8", errors="replace")
 
         while self._running:
             try:
-                # Read headers until we find Content-Length
-                content_length = None
+                # Read one JSON line
+                line = stdout.readline()
+                if not line:
+                    logger.debug("OmniSharp stdout closed")
+                    self._running = False
+                    return
 
-                while True:
-                    # Read one byte at a time to find header boundary
-                    byte = stdout.read(1)
-                    if not byte:
-                        logger.debug("OmniSharp stdout closed")
-                        self._running = False
-                        return
-
-                    buffer += byte
-
-                    # Check for header end (\r\n\r\n)
-                    if buffer.endswith(b"\r\n\r\n"):
-                        # Parse headers
-                        header_text = buffer[:-4].decode("utf-8", errors="replace")
-                        for line in header_text.split("\r\n"):
-                            if line.lower().startswith("content-length:"):
-                                content_length = int(line.split(":")[1].strip())
-                        buffer = b""
-                        break
-
-                    # Also handle \n\n for simpler implementations
-                    if buffer.endswith(b"\n\n"):
-                        header_text = buffer[:-2].decode("utf-8", errors="replace")
-                        for line in header_text.split("\n"):
-                            if line.lower().startswith("content-length:"):
-                                content_length = int(line.split(":")[1].strip())
-                        buffer = b""
-                        break
-
-                if content_length is None:
-                    logger.warning("No Content-Length in headers, skipping")
-                    continue
-
-                # Read the body
-                body = stdout.read(content_length)
-                if len(body) < content_length:
-                    logger.warning(
-                        "Incomplete body: expected %d, got %d",
-                        content_length,
-                        len(body),
-                    )
+                line = line.strip()
+                if not line:
                     continue
 
                 # Parse JSON response
                 try:
-                    data = json.loads(body.decode("utf-8"))
+                    data = json.loads(line)
                 except json.JSONDecodeError as e:
-                    logger.warning("Invalid JSON response: %s", e)
+                    logger.warning("Invalid JSON response: %s - line: %s", e, line[:100])
                     continue
 
                 # Handle different message types
@@ -391,13 +362,12 @@ class OmniSharpServer:
 
         # Serialise with OmniSharp field names
         request_data = request.model_dump(by_alias=True, exclude_none=True)
-        body = json.dumps(request_data).encode("utf-8")
 
-        # Build message with Content-Length header
-        message = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8") + body
+        # OmniSharp --stdio uses JSON lines (newline-delimited JSON)
+        message = json.dumps(request_data) + "\n"
 
         try:
-            self._process.stdin.write(message)
+            self._process.stdin.write(message.encode("utf-8"))
             self._process.stdin.flush()
         except (BrokenPipeError, OSError) as e:
             raise OmniSharpError(f"Failed to send request: {e}") from e
@@ -444,11 +414,11 @@ class OmniSharpServer:
         )
 
         request_data = request.model_dump(by_alias=True, exclude_none=True)
-        body = json.dumps(request_data).encode("utf-8")
-        message = f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8") + body
+        # OmniSharp --stdio uses JSON lines (newline-delimited JSON)
+        message = json.dumps(request_data) + "\n"
 
         try:
-            self._process.stdin.write(message)
+            self._process.stdin.write(message.encode("utf-8"))
             self._process.stdin.flush()
         except (BrokenPipeError, OSError) as e:
             with self._read_lock:
