@@ -46,3 +46,8 @@ htmlcov/
 
 # Foundry runtime
 .foundry/
+
+# .NET build artifacts
+bin/
+obj/
+*.sln
