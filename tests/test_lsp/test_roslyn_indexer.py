@@ -318,3 +318,195 @@ class TestRoslynIndexerResultIntegrity:
         # This should type-check (we're just verifying the type exists)
         cb: RoslynProgressCallback = callback
         assert callable(cb)
+
+
+class TestIndexRepoMethod:
+    """Tests for the index_repo method and solution discovery."""
+
+    def test_index_repo_method_exists(self):
+        """Test that index_repo method exists on RoslynIndexer."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        assert hasattr(indexer, "index_repo")
+        assert callable(indexer.index_repo)
+
+    def test_index_repo_with_invalid_repo_path(self, tmp_path: Path):
+        """Test index_repo returns error for non-existent path."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        nonexistent = tmp_path / "nonexistent"
+
+        result = indexer.index_repo(nonexistent)
+
+        assert result.files_indexed == 0
+        assert len(result.errors) == 1
+        assert "not a directory" in result.errors[0]
+
+    def test_index_repo_with_invalid_solution_file(self, tmp_path: Path):
+        """Test index_repo returns error for non-existent solution file."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+
+        result = indexer.index_repo(tmp_path, solution_file="/nonexistent/Test.sln")
+
+        assert result.files_indexed == 0
+        assert len(result.errors) == 1
+        assert "Solution file not found" in result.errors[0]
+
+    def test_index_repo_no_solution_found(self, tmp_path: Path):
+        """Test index_repo returns error when no solution files exist."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        # Create an empty directory
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("# Python file")
+
+        result = indexer.index_repo(tmp_path)
+
+        assert result.files_indexed == 0
+        assert len(result.errors) == 1
+        assert "No .sln or .csproj file found" in result.errors[0]
+
+
+class TestSolutionDiscovery:
+    """Tests for solution file auto-discovery."""
+
+    def test_discover_sln_at_root(self, tmp_path: Path):
+        """Test discovering .sln file at repository root."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        sln_path = tmp_path / "MyProject.sln"
+        sln_path.write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result == sln_path
+
+    def test_discover_sln_prefers_matching_name(self, tmp_path: Path):
+        """Test that discovery prefers .sln matching directory name."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        # Create directory with specific name
+        repo_dir = tmp_path / "MyApp"
+        repo_dir.mkdir()
+        # Create multiple .sln files
+        (repo_dir / "Other.sln").write_text("")
+        (repo_dir / "MyApp.sln").write_text("")
+        (repo_dir / "Another.sln").write_text("")
+
+        result = indexer._discover_solution(repo_dir)
+
+        assert result is not None
+        assert result.stem == "MyApp"
+
+    def test_discover_sln_alphabetical_fallback(self, tmp_path: Path):
+        """Test that discovery uses alphabetical order when no name match."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        (tmp_path / "Zebra.sln").write_text("")
+        (tmp_path / "Alpha.sln").write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result is not None
+        assert result.stem == "Alpha"
+
+    def test_discover_sln_in_subdirectory(self, tmp_path: Path):
+        """Test discovering .sln file one level deep."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        subdir = tmp_path / "src"
+        subdir.mkdir()
+        sln_path = subdir / "MyProject.sln"
+        sln_path.write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result == sln_path
+
+    def test_discover_csproj_fallback(self, tmp_path: Path):
+        """Test falling back to .csproj when no .sln found."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        csproj_path = tmp_path / "MyProject.csproj"
+        csproj_path.write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result == csproj_path
+
+    def test_discover_prefers_sln_over_csproj(self, tmp_path: Path):
+        """Test that .sln is preferred over .csproj at same level."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        (tmp_path / "MyProject.sln").write_text("")
+        (tmp_path / "MyProject.csproj").write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result is not None
+        assert result.suffix == ".sln"
+
+    def test_discover_sln_nested_deep(self, tmp_path: Path):
+        """Test discovering .sln file in nested directory."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        sln_path = nested / "Deep.sln"
+        sln_path.write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result == sln_path
+
+    def test_discover_skips_hidden_directories(self, tmp_path: Path):
+        """Test that hidden directories are skipped during discovery."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        hidden = tmp_path / ".hidden"
+        hidden.mkdir()
+        (hidden / "Hidden.sln").write_text("")
+        # Also create a visible one to find
+        (tmp_path / "Visible.sln").write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result is not None
+        assert result.stem == "Visible"
+
+    def test_discover_returns_none_for_empty_dir(self, tmp_path: Path):
+        """Test that discovery returns None for empty directory."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result is None
+
+    def test_discover_csproj_in_subdirectory(self, tmp_path: Path):
+        """Test discovering .csproj file one level deep."""
+        from code_intel.indexer.roslyn import RoslynIndexer
+
+        indexer = RoslynIndexer()
+        subdir = tmp_path / "src"
+        subdir.mkdir()
+        csproj_path = subdir / "MyProject.csproj"
+        csproj_path.write_text("")
+
+        result = indexer._discover_solution(tmp_path)
+
+        assert result == csproj_path
