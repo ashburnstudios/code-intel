@@ -49,6 +49,16 @@ from code_intel.profile import (
     SpeedscopeParser,
     ValueUnit,
 )
+from code_intel.profile.correlation import (
+    FrameLanguage,
+    FrameNormaliser,
+    FrameParser,
+    MatchConfidence,
+    NormalisedFrame,
+    ProfileCorrelator,
+    SymbolMatcher,
+    SymbolMatchResult,
+)
 
 __version__ = "0.1.0"
 
@@ -99,4 +109,13 @@ __all__ = [
     "ProfileType",
     "SpeedscopeParser",
     "ValueUnit",
+    # Correlation
+    "FrameLanguage",
+    "FrameNormaliser",
+    "FrameParser",
+    "MatchConfidence",
+    "NormalisedFrame",
+    "ProfileCorrelator",
+    "SymbolMatcher",
+    "SymbolMatchResult",
 ]
