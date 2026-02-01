@@ -15,6 +15,14 @@ from code_intel.graph.schema import (
     NodeKind,
 )
 from code_intel.graph.storage import GraphStorage
+from code_intel.profile.schema import (
+    FunctionStats,
+    Profile,
+    ProfileComparison,
+    ProfileMetadata,
+)
+from code_intel.profile.speedscope import SpeedscopeParser
+from code_intel.profile.storage import ProfileStorage
 
 if TYPE_CHECKING:
     from code_intel.parser.base import BaseParser
@@ -46,6 +54,26 @@ class IndexResult:
 
     errors: list[str] = field(default_factory=list)
     """List of error messages from failed files."""
+
+
+@dataclass
+class ProfileIngestResult:
+    """Result of a profile ingestion operation."""
+
+    profiles_ingested: int = 0
+    """Number of profiles successfully ingested."""
+
+    total_frames: int = 0
+    """Total number of unique frames across all profiles."""
+
+    total_functions: int = 0
+    """Total number of functions with stats."""
+
+    symbols_correlated: int = 0
+    """Number of frames successfully correlated with code symbols."""
+
+    errors: list[str] = field(default_factory=list)
+    """List of error messages."""
 
 
 @dataclass
@@ -121,6 +149,8 @@ class CodeIntelClient:
         """
         self._db_path = Path(db_path) if db_path else None
         self._storage = GraphStorage(db_path)
+        self._profile_storage = ProfileStorage(db_path)
+        self._speedscope_parser = SpeedscopeParser()
         self._parsers: dict[str, BaseParser] = {}
 
     def register_parser(self, parser: BaseParser) -> None:
@@ -460,7 +490,361 @@ class CodeIntelClient:
         )
 
     # =========================================================================
+    # Profile Analysis Methods
+    # =========================================================================
+
+    def ingest_profile(
+        self,
+        profile_path: Path | str,
+        repo_path: Path | str | None = None,
+        *,
+        metadata: ProfileMetadata | None = None,
+        correlate_symbols: bool = True,
+    ) -> ProfileIngestResult:
+        """Ingest a speedscope profile and store it for analysis.
+
+        Parses the profile, computes per-function statistics, and optionally
+        correlates profile frames with code-intel symbol graph nodes.
+
+        Args:
+            profile_path: Path to the speedscope JSON file.
+            repo_path: Repository path for scoping symbol correlation.
+            metadata: Optional metadata (commit SHA, scenario, tags).
+            correlate_symbols: If True, attempt to match frames to code symbols.
+
+        Returns:
+            ProfileIngestResult with ingestion statistics.
+
+        Example:
+            result = client.ingest_profile(
+                "profile.speedscope.json",
+                repo_path="/path/to/repo",
+                metadata=ProfileMetadata(
+                    commit_sha="abc123",
+                    scenario="startup",
+                    tags=["regression-test"],
+                ),
+            )
+            print(f"Ingested {result.profiles_ingested} profiles")
+        """
+        result = ProfileIngestResult()
+        repo_path_str = self._resolve_repo_path(repo_path) if repo_path else None
+
+        try:
+            profiles = self._speedscope_parser.parse_file(
+                profile_path,
+                repo_path=repo_path_str,
+                metadata=metadata,
+            )
+        except Exception as e:
+            result.errors.append(f"Failed to parse profile: {e}")
+            return result
+
+        for profile in profiles:
+            try:
+                self._profile_storage.create_profile(profile)
+                result.profiles_ingested += 1
+                result.total_frames += len(profile.frames)
+                result.total_functions += len(profile.function_stats)
+
+                # Correlate with code graph if requested
+                if correlate_symbols and repo_path_str:
+                    correlated = self._correlate_profile_symbols(
+                        profile, repo_path_str
+                    )
+                    result.symbols_correlated += correlated
+            except Exception as e:
+                result.errors.append(f"Failed to store profile '{profile.name}': {e}")
+
+        return result
+
+    def get_profile(self, profile_id: str) -> Profile | None:
+        """Retrieve a profile by ID.
+
+        Args:
+            profile_id: Unique identifier of the profile.
+
+        Returns:
+            Profile if found, None otherwise.
+        """
+        return self._profile_storage.get_profile(profile_id)
+
+    def list_profiles(
+        self,
+        repo_path: Path | str | None = None,
+        *,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[Profile]:
+        """List profiles, optionally filtered by repository.
+
+        Args:
+            repo_path: Optional repository path filter.
+            limit: Maximum number of results.
+            offset: Number of results to skip.
+
+        Returns:
+            List of Profile objects (metadata only, no full stats).
+        """
+        repo_path_str = self._resolve_repo_path(repo_path) if repo_path else None
+        return self._profile_storage.list_profiles(
+            repo_path_str, limit=limit, offset=offset
+        )
+
+    def delete_profile(self, profile_id: str) -> bool:
+        """Delete a profile and all associated data.
+
+        Args:
+            profile_id: ID of the profile to delete.
+
+        Returns:
+            True if deleted, False if not found.
+        """
+        return self._profile_storage.delete_profile(profile_id)
+
+    def top_functions(
+        self,
+        profile_id: str,
+        *,
+        limit: int = 10,
+        by: str = "self",
+    ) -> list[FunctionStats]:
+        """Get the hottest functions in a profile.
+
+        Args:
+            profile_id: ID of the profile to query.
+            limit: Maximum number of results.
+            by: Sort key - 'self' for self time, 'total' for total time.
+
+        Returns:
+            List of FunctionStats sorted by the specified metric.
+
+        Example:
+            hotspots = client.top_functions(profile_id, limit=10)
+            for fn in hotspots:
+                print(f"{fn.name}: {fn.self_percentage:.1f}% self time")
+        """
+        return self._profile_storage.get_top_functions(
+            profile_id, limit=limit, by=by
+        )
+
+    def compare_profiles(
+        self,
+        before_id: str,
+        after_id: str,
+        *,
+        threshold_pct: float = 5.0,
+    ) -> ProfileComparison | None:
+        """Compare two profiles to find regressions and improvements.
+
+        Args:
+            before_id: ID of the 'before' profile (baseline).
+            after_id: ID of the 'after' profile (comparison).
+            threshold_pct: Minimum percentage change to report (default 5%).
+
+        Returns:
+            ProfileComparison with deltas, or None if profiles not found.
+
+        Example:
+            comparison = client.compare_profiles(baseline_id, new_id)
+            if comparison:
+                for reg in comparison.regressions[:5]:
+                    print(f"REGRESSION: {reg.name} +{reg.self_weight_change_pct:.1f}%")
+        """
+        return self._profile_storage.compare_profiles(
+            before_id, after_id, threshold_pct=threshold_pct
+        )
+
+    def function_trend(
+        self,
+        function_name: str,
+        repo_path: Path | str | None = None,
+        *,
+        limit: int = 10,
+    ) -> list[tuple[Profile, FunctionStats]]:
+        """Get a function's performance over time across profiles.
+
+        Useful for tracking whether a function is getting slower or faster
+        across multiple profiling sessions.
+
+        Args:
+            function_name: Name of the function to track.
+            repo_path: Optional repository path filter.
+            limit: Maximum number of profiles to include.
+
+        Returns:
+            List of (Profile, FunctionStats) tuples, ordered by profile date.
+
+        Example:
+            trend = client.function_trend("process_data", limit=5)
+            for profile, stats in trend:
+                print(f"{profile.name}: {stats.self_weight:.2f}ms")
+        """
+        repo_path_str = self._resolve_repo_path(repo_path) if repo_path else None
+        return self._profile_storage.get_function_trend(
+            function_name, repo_path_str, limit=limit
+        )
+
+    def hot_callers(
+        self,
+        symbol: str,
+        repo_path: Path | str,
+        *,
+        profile_id: str | None = None,
+    ) -> list[tuple[GraphNode, FunctionStats | None]]:
+        """Find callers of a function with their performance data.
+
+        Combines code-intel call graph analysis with profile data to show
+        which callers of a function are contributing to its runtime cost.
+
+        Args:
+            symbol: Name of the function to find callers for.
+            repo_path: Repository path for the code graph.
+            profile_id: Optional profile ID to get performance data from.
+
+        Returns:
+            List of (GraphNode, FunctionStats) tuples. FunctionStats is None
+            if no profile data is available for that caller.
+
+        Example:
+            callers = client.hot_callers("slow_function", repo_path, profile_id=pid)
+            for caller, stats in callers:
+                if stats:
+                    print(f"{caller.name}: {stats.self_weight:.2f}ms")
+                else:
+                    print(f"{caller.name}: no profile data")
+        """
+        repo_path_str = self._resolve_repo_path(repo_path)
+
+        # Get callers from code graph
+        callers = self._storage.find_callers(symbol, repo_path_str)
+
+        # If no profile specified, return callers without stats
+        if not profile_id:
+            return [(caller, None) for caller in callers]
+
+        # Get profile and build stats lookup
+        profile = self._profile_storage.get_profile(profile_id)
+        if not profile:
+            return [(caller, None) for caller in callers]
+
+        stats_by_name: dict[str, FunctionStats] = {
+            s.name: s for s in profile.function_stats
+        }
+
+        # Match callers to stats
+        result: list[tuple[GraphNode, FunctionStats | None]] = []
+        for caller in callers:
+            # Try exact name match first
+            stats = stats_by_name.get(caller.name)
+
+            # Try qualified name if no exact match
+            if not stats and caller.qualified_name:
+                stats = stats_by_name.get(caller.qualified_name)
+
+            result.append((caller, stats))
+
+        # Sort by stats weight if available
+        result.sort(
+            key=lambda x: x[1].self_weight if x[1] else 0,
+            reverse=True,
+        )
+
+        return result
+
+    # =========================================================================
     # Private methods
+    # =========================================================================
+
+    def _correlate_profile_symbols(
+        self,
+        profile: Profile,
+        repo_path: str,
+    ) -> int:
+        """Correlate profile frames with code graph symbols.
+
+        Attempts to match each frame in the profile to a node in the code
+        graph based on function name and file path.
+
+        Args:
+            profile: Profile to correlate.
+            repo_path: Repository path for the code graph.
+
+        Returns:
+            Number of frames successfully correlated.
+        """
+        correlations: dict[int, str] = {}
+
+        for idx, frame in enumerate(profile.frames):
+            # Try to find a matching symbol
+            symbol_id = self._find_symbol_for_frame(frame, repo_path)
+            if symbol_id:
+                correlations[idx] = symbol_id
+
+        if correlations:
+            self._profile_storage.update_symbol_correlations(
+                profile.id, correlations
+            )
+
+        return len(correlations)
+
+    def _find_symbol_for_frame(self, frame, repo_path: str) -> str | None:
+        """Find a code graph symbol matching a profile frame.
+
+        Uses multiple strategies:
+        1. If file+line available, find symbol at that location
+        2. Match by function name
+        3. Match by qualified name patterns
+
+        Args:
+            frame: Profile frame to match.
+            repo_path: Repository path for scoping.
+
+        Returns:
+            Node ID if found, None otherwise.
+        """
+        # Parse the frame name to get a searchable symbol
+        name = frame.to_qualified_name()
+
+        # Extract the simple function name (last component)
+        simple_name = name.split(".")[-1] if "." in name else name
+
+        # Strategy 1: If we have file info, find by location
+        if frame.file and frame.line:
+            nodes = self._storage.get_nodes_by_file(frame.file, repo_path)
+            for node in nodes:
+                if node.location.start_line == frame.line:
+                    return node.id
+                # Also check if the line is within the node's range
+                if (
+                    node.location.start_line <= frame.line
+                    and node.location.end_line >= frame.line
+                    and node.name == simple_name
+                ):
+                    return node.id
+
+        # Strategy 2: Match by simple name
+        nodes = self._storage.get_nodes_by_name(simple_name, repo_path)
+        if len(nodes) == 1:
+            return nodes[0].id
+
+        # Strategy 3: If multiple matches, try qualified name
+        if len(nodes) > 1:
+            for node in nodes:
+                if node.qualified_name and node.qualified_name == name:
+                    return node.id
+                # Check if qualified name ends with our search name
+                if node.qualified_name and node.qualified_name.endswith(f".{name}"):
+                    return node.id
+
+        # Strategy 4: Return first match if any
+        if nodes:
+            return nodes[0].id
+
+        return None
+
+    # =========================================================================
+    # Private methods (continued)
     # =========================================================================
 
     def _get_supported_extensions(self) -> list[str]:
