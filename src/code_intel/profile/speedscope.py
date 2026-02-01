@@ -7,13 +7,15 @@ Supports:
 - Sampled profiles (stack snapshots with weights)
 - Evented profiles (open/close frame events)
 - Multiple profiles per file
+- Streaming for large files (>100MB) via ijson (optional dependency)
 """
 
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from code_intel.profile.schema import (
     Frame,
@@ -23,6 +25,14 @@ from code_intel.profile.schema import (
     ProfileType,
     ValueUnit,
 )
+
+# Optional ijson import for streaming large files
+try:
+    import ijson
+
+    IJSON_AVAILABLE = True
+except ImportError:
+    IJSON_AVAILABLE = False
 
 
 class SpeedscopeParser:
@@ -301,27 +311,19 @@ class SpeedscopeParser:
         result.sort(key=lambda s: s.self_weight, reverse=True)
         return result
 
-    def _compute_evented_stats(
+    def _compute_evented_stats_from_iter(
         self,
-        profile_data: dict[str, Any],
+        events: Iterator[dict[str, Any]],
         frames: list[Frame],
         profile_id: str,
+        start_value: float,
+        end_value: float,
     ) -> list[FunctionStats]:
-        """Compute function statistics from an evented profile.
+        """Compute function statistics from an iterator of events.
 
-        In an evented profile:
-        - events: array of {type, at, frame} objects
-        - type: 'O' for open, 'C' for close
-        - at: timestamp
-        - frame: frame index
-
-        Self time = time when this frame is the most recent open frame
-        Total time = time between open and close
+        This is the streaming-aware version that can process events one at a time
+        without loading them all into memory.
         """
-        events = profile_data.get("events", [])
-        if not events:
-            return []
-
         # Stack of open frames: [(frame_idx, open_time)]
         stack: list[tuple[int, float]] = []
 
@@ -365,8 +367,6 @@ class SpeedscopeParser:
                     last_top_time = timestamp
 
         # Calculate total profile duration for percentages
-        start_value = profile_data.get("startValue", 0)
-        end_value = profile_data.get("endValue", 0)
         total_duration = end_value - start_value
 
         # Convert to FunctionStats objects
@@ -397,3 +397,145 @@ class SpeedscopeParser:
         # Sort by self weight descending
         result.sort(key=lambda s: s.self_weight, reverse=True)
         return result
+
+    def _compute_evented_stats(
+        self,
+        profile_data: dict[str, Any],
+        frames: list[Frame],
+        profile_id: str,
+    ) -> list[FunctionStats]:
+        """Compute function statistics from an evented profile.
+
+        In an evented profile:
+        - events: array of {type, at, frame} objects
+        - type: 'O' for open, 'C' for close
+        - at: timestamp
+        - frame: frame index
+
+        Self time = time when this frame is the most recent open frame
+        Total time = time between open and close
+        """
+        events = profile_data.get("events", [])
+        start_value = profile_data.get("startValue", 0)
+        end_value = profile_data.get("endValue", 0)
+
+        # Delegate to the iterator-based implementation
+        return self._compute_evented_stats_from_iter(
+            iter(events), frames, profile_id, start_value, end_value
+        )
+
+    # =========================================================================
+    # Streaming Parser for Large Files
+    # =========================================================================
+
+    def parse_file_streaming(
+        self,
+        path: Path | str,
+        *,
+        repo_path: str | None = None,
+        metadata: ProfileMetadata | None = None,
+    ) -> Iterator[Profile]:
+        """Parse a speedscope JSON file using streaming for large files.
+
+        This method uses ijson to incrementally parse the JSON, keeping memory
+        usage bounded regardless of file size. It yields profiles one at a time
+        as they are parsed.
+
+        Requires the 'ijson' package: pip install code-intel[streaming]
+
+        Args:
+            path: Path to the speedscope JSON file.
+            repo_path: Optional repository path to associate with profiles.
+            metadata: Optional metadata to attach to all profiles.
+
+        Yields:
+            Profile objects as they are parsed.
+
+        Raises:
+            ImportError: If ijson is not installed.
+            ValueError: If the file is not a valid speedscope format.
+            FileNotFoundError: If the file does not exist.
+        """
+        if not IJSON_AVAILABLE:
+            raise ImportError(
+                "ijson is required for streaming parsing. "
+                "Install it with: pip install code-intel[streaming]"
+            )
+
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Profile file not found: {path}")
+
+        with open(path, "rb") as f:
+            yield from self._parse_streaming(
+                f,
+                source_file=str(path),
+                repo_path=repo_path,
+                metadata=metadata,
+            )
+
+    def _parse_streaming(
+        self,
+        file_obj: BinaryIO,
+        *,
+        source_file: str | None = None,
+        repo_path: str | None = None,
+        metadata: ProfileMetadata | None = None,
+    ) -> Iterator[Profile]:
+        """Internal streaming parser implementation.
+
+        The speedscope format has this structure:
+        {
+            "name": "...",
+            "exporter": "...",
+            "shared": { "frames": [...] },
+            "profiles": [...]
+        }
+
+        We need to:
+        1. First pass: collect file-level metadata and shared frames
+        2. Second pass: stream through profiles one at a time
+        """
+        # First pass: collect shared data (frames are usually small)
+        file_obj.seek(0)
+        file_name = ""
+        exporter = ""
+        shared_frames: list[Frame] = []
+
+        # Parse top-level fields and shared.frames
+        for prefix, event, value in ijson.parse(file_obj):
+            if prefix == "name" and event == "string":
+                file_name = value
+            elif prefix == "exporter" and event == "string":
+                exporter = value
+
+        # Collect frames in a separate pass (they're needed before profiles)
+        file_obj.seek(0)
+        for frame_data in ijson.items(file_obj, "shared.frames.item"):
+            frame = Frame(
+                name=frame_data.get("name", "<unknown>"),
+                file=frame_data.get("file"),
+                line=frame_data.get("line"),
+                col=frame_data.get("col"),
+            )
+            shared_frames.append(frame)
+
+        if not shared_frames:
+            raise ValueError("Invalid speedscope format: no frames found in shared.frames")
+
+        # Second pass: stream through profiles
+        file_obj.seek(0)
+        profile_index = 0
+        for profile_data in ijson.items(file_obj, "profiles.item"):
+            profile = self._parse_profile(
+                profile_data,
+                shared_frames=shared_frames,
+                profile_index=profile_index,
+                file_name=file_name,
+                exporter=exporter,
+                source_file=source_file,
+                repo_path=repo_path,
+                base_metadata=metadata,
+            )
+            yield profile
+            profile_index += 1
