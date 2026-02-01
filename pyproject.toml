@@ -58,6 +58,10 @@ all-languages = [
     "tree-sitter-python>=0.21.0",
     "tree-sitter-c-sharp>=0.21.0",
 ]
+# Streaming JSON support for large profile files (>100MB)
+streaming = [
+    "ijson>=3.2.0",
+]
 # LSP-based semantic indexing (requires external OmniSharp installation)
 # Install OmniSharp via: dotnet tool install -g omnisharp
 # or VS Code C# extension

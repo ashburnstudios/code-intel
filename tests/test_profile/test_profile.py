@@ -316,6 +316,222 @@ class TestSpeedscopeParser:
 
 
 # =============================================================================
+# Streaming Parser Tests
+# =============================================================================
+
+# Check if ijson is available for streaming tests
+try:
+    import ijson  # noqa: F401
+
+    IJSON_AVAILABLE = True
+except ImportError:
+    IJSON_AVAILABLE = False
+
+
+@pytest.mark.skipif(not IJSON_AVAILABLE, reason="ijson not installed")
+class TestSpeedscopeParserStreaming:
+    """Tests for speedscope streaming parser (large file support)."""
+
+    def test_streaming_sampled_profile(
+        self, parser: SpeedscopeParser, sampled_profile_path: Path
+    ) -> None:
+        """Test streaming parsing of a sampled profile."""
+        profiles = list(parser.parse_file_streaming(sampled_profile_path))
+
+        assert len(profiles) == 1
+        profile = profiles[0]
+
+        assert profile.profile_type == ProfileType.SAMPLED
+        assert profile.unit == ValueUnit.MILLISECONDS
+        assert len(profile.frames) == 4
+        assert profile.start_value == 0
+        assert profile.end_value == 1000
+
+    def test_streaming_sampled_stats(
+        self, parser: SpeedscopeParser, sampled_profile_path: Path
+    ) -> None:
+        """Test that streaming sampled profile computes correct stats."""
+        profiles = list(parser.parse_file_streaming(sampled_profile_path))
+        profile = profiles[0]
+
+        stats_by_name = {s.name: s for s in profile.function_stats}
+
+        # Same assertions as non-streaming version
+        assert stats_by_name["calculate"].self_weight == 500
+        assert stats_by_name["calculate"].call_count == 2
+        assert stats_by_name["helper"].self_weight == 150
+        assert stats_by_name["main"].self_weight == 150
+
+    def test_streaming_evented_profile(
+        self, parser: SpeedscopeParser, evented_profile_path: Path
+    ) -> None:
+        """Test streaming parsing of an evented profile."""
+        profiles = list(parser.parse_file_streaming(evented_profile_path))
+
+        assert len(profiles) == 1
+        profile = profiles[0]
+
+        assert profile.profile_type == ProfileType.EVENTED
+        assert profile.unit == ValueUnit.MILLISECONDS
+        assert len(profile.frames) == 3
+        assert profile.duration == 500
+
+    def test_streaming_evented_stats(
+        self, parser: SpeedscopeParser, evented_profile_path: Path
+    ) -> None:
+        """Test that streaming evented profile computes correct stats."""
+        profiles = list(parser.parse_file_streaming(evented_profile_path))
+        profile = profiles[0]
+
+        stats_by_name = {s.name: s for s in profile.function_stats}
+
+        # Same assertions as non-streaming version
+        assert stats_by_name["calculate"].total_weight == 200
+        assert stats_by_name["process_data"].total_weight == 350
+        assert stats_by_name["main"].total_weight == 500
+
+    def test_streaming_multi_profile(
+        self, parser: SpeedscopeParser, multi_profile_path: Path
+    ) -> None:
+        """Test streaming parsing yields profiles one at a time."""
+        profiles = list(parser.parse_file_streaming(multi_profile_path))
+
+        assert len(profiles) == 2
+        assert "Baseline" in profiles[0].name
+        assert "Optimisation" in profiles[1].name
+
+    def test_streaming_yields_incrementally(
+        self, parser: SpeedscopeParser, multi_profile_path: Path
+    ) -> None:
+        """Test that streaming parser yields profiles incrementally."""
+        profile_iter = parser.parse_file_streaming(multi_profile_path)
+
+        # Get first profile
+        first = next(profile_iter)
+        assert "Baseline" in first.name
+
+        # Get second profile
+        second = next(profile_iter)
+        assert "Optimisation" in second.name
+
+        # No more profiles
+        with pytest.raises(StopIteration):
+            next(profile_iter)
+
+    def test_streaming_nonexistent_file(self, parser: SpeedscopeParser) -> None:
+        """Test streaming parsing a nonexistent file raises error."""
+        with pytest.raises(FileNotFoundError):
+            list(parser.parse_file_streaming(Path("/nonexistent/profile.json")))
+
+    def test_streaming_with_metadata(
+        self, parser: SpeedscopeParser, sampled_profile_path: Path
+    ) -> None:
+        """Test streaming parsing with custom metadata."""
+        metadata = ProfileMetadata(
+            commit_sha="stream-test-sha",
+            scenario="streaming-test",
+            tags=["streaming"],
+        )
+        profiles = list(
+            parser.parse_file_streaming(
+                sampled_profile_path,
+                repo_path="/stream/repo",
+                metadata=metadata,
+            )
+        )
+
+        profile = profiles[0]
+        assert profile.repo_path == "/stream/repo"
+        assert profile.metadata.commit_sha == "stream-test-sha"
+        assert "streaming" in profile.metadata.tags
+
+    def test_streaming_matches_regular_parsing(
+        self, parser: SpeedscopeParser, sampled_profile_path: Path
+    ) -> None:
+        """Test that streaming produces identical results to regular parsing."""
+        regular = parser.parse_file(sampled_profile_path)[0]
+        streaming = list(parser.parse_file_streaming(sampled_profile_path))[0]
+
+        # Compare key attributes (IDs will differ)
+        assert regular.name == streaming.name
+        assert regular.profile_type == streaming.profile_type
+        assert regular.unit == streaming.unit
+        assert regular.start_value == streaming.start_value
+        assert regular.end_value == streaming.end_value
+        assert len(regular.frames) == len(streaming.frames)
+        assert len(regular.function_stats) == len(streaming.function_stats)
+
+        # Compare frame names
+        regular_names = {f.name for f in regular.frames}
+        streaming_names = {f.name for f in streaming.frames}
+        assert regular_names == streaming_names
+
+        # Compare function stats
+        regular_stats = {s.name: s.self_weight for s in regular.function_stats}
+        streaming_stats = {s.name: s.self_weight for s in streaming.function_stats}
+        assert regular_stats == streaming_stats
+
+    def test_streaming_large_profile(
+        self, parser: SpeedscopeParser, tmp_path: Path
+    ) -> None:
+        """Test streaming parsing of a larger profile (stress test)."""
+        import json
+
+        # Generate a large profile with many samples
+        num_frames = 100
+        num_samples = 10000
+
+        frames = [
+            {"name": f"func_{i}", "file": f"src/file_{i % 10}.py", "line": i * 10}
+            for i in range(num_frames)
+        ]
+
+        samples = []
+        weights = []
+        for i in range(num_samples):
+            # Create stack traces of varying depth
+            depth = (i % 5) + 1
+            sample = [i % num_frames for _ in range(depth)]
+            samples.append(sample)
+            weights.append(1)
+
+        data = {
+            "$schema": "https://www.speedscope.app/file-format-schema.json",
+            "name": "large_test_profile",
+            "shared": {"frames": frames},
+            "profiles": [
+                {
+                    "type": "sampled",
+                    "name": "Large Profile",
+                    "unit": "milliseconds",
+                    "startValue": 0,
+                    "endValue": num_samples,
+                    "samples": samples,
+                    "weights": weights,
+                }
+            ],
+        }
+
+        large_file = tmp_path / "large_profile.speedscope.json"
+        with open(large_file, "w") as f:
+            json.dump(data, f)
+
+        # Parse with streaming
+        profiles = list(parser.parse_file_streaming(large_file))
+
+        assert len(profiles) == 1
+        profile = profiles[0]
+
+        assert profile.profile_type == ProfileType.SAMPLED
+        assert len(profile.frames) == num_frames
+        assert len(profile.function_stats) > 0
+
+        # Verify stats are computed correctly
+        total_samples = sum(s.call_count for s in profile.function_stats)
+        assert total_samples == num_samples
+
+
+# =============================================================================
 # Storage Tests
 # =============================================================================
 
