@@ -440,7 +440,7 @@ class ProfileStorage:
 
     def get_function_trend(
         self,
-        function_name: str,
+        function_name_or_pattern: str,
         repo_path: str | None = None,
         *,
         limit: int = 10,
@@ -448,15 +448,20 @@ class ProfileStorage:
         """Get a function's performance over time across profiles.
 
         Args:
-            function_name: Name of the function to track.
+            function_name_or_pattern: Name or pattern of the function to track.
+                                      Supports SQL wildcards (% and _).
             repo_path: Optional repository path filter.
             limit: Maximum number of profiles to include.
 
         Returns:
             List of (Profile, FunctionStats) tuples, ordered by profile date.
         """
+        # Determine if this is a pattern or exact match
+        is_pattern = "%" in function_name_or_pattern or "_" in function_name_or_pattern
+        match_clause = "fs.name LIKE ?" if is_pattern else "fs.name = ?"
+
         # Use explicit column aliases to avoid ambiguity in the JOIN
-        query = """
+        query = f"""
             SELECT
                 p.id as p_id,
                 p.name as p_name,
@@ -481,9 +486,9 @@ class ProfileStorage:
                 fs.symbol_id as fs_symbol_id
             FROM profiles p
             JOIN function_stats fs ON p.id = fs.profile_id
-            WHERE fs.name = ?
+            WHERE {match_clause}
         """
-        params: list[str | int] = [function_name]
+        params: list[str | int] = [function_name_or_pattern]
 
         if repo_path:
             query += " AND p.repo_path = ?"
@@ -628,6 +633,55 @@ class ProfileStorage:
             new_functions=new_functions,
             removed_functions=removed_functions,
         )
+
+    def search_functions(
+        self,
+        pattern: str,
+        *,
+        profile_id: str | None = None,
+        limit: int = 50,
+    ) -> list[FunctionStats]:
+        """Search for functions matching a pattern across profiles.
+
+        Uses SQLite LIKE pattern matching (% and _ wildcards).
+        If pattern doesn't contain wildcards, performs substring match.
+
+        Args:
+            pattern: Pattern to match against function names. Supports SQL
+                     wildcards (% for any, _ for single char). If no wildcards
+                     are present, matches anywhere in the name.
+            profile_id: Optional profile ID to scope the search.
+            limit: Maximum number of results.
+
+        Returns:
+            List of FunctionStats matching the pattern.
+        """
+        # If pattern has no wildcards, make it a substring search
+        if "%" not in pattern and "_" not in pattern:
+            like_pattern = f"%{pattern}%"
+        else:
+            like_pattern = pattern
+
+        query = """
+            SELECT DISTINCT
+                profile_id, frame_index, name, file, line,
+                self_weight, total_weight, call_count,
+                self_percentage, total_percentage, symbol_id
+            FROM function_stats
+            WHERE name LIKE ?
+        """
+        params: list[str | int] = [like_pattern]
+
+        if profile_id:
+            query += " AND profile_id = ?"
+            params.append(profile_id)
+
+        query += " ORDER BY self_weight DESC LIMIT ?"
+        params.append(limit)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [self._row_to_function_stats(row) for row in cursor.fetchall()]
 
     def get_functions_by_symbol(
         self,

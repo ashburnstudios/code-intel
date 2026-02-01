@@ -1036,3 +1036,337 @@ class TestFrameSymbolMappingStorage:
         stats_by_name = {s.name: s for s in result.function_stats}
         assert stats_by_name["mapped_func"].symbol_id == "node-mapped"
         assert stats_by_name["unmapped_func"].symbol_id is None
+
+
+# =============================================================================
+# Search Functions Tests (CINT-24)
+# =============================================================================
+
+
+class TestSearchFunctions:
+    """Tests for search_functions query method."""
+
+    def test_search_exact_match(self, storage: ProfileStorage) -> None:
+        """Test searching with an exact function name (no wildcards)."""
+        profile = Profile(
+            id="search-test",
+            name="Search Test",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="search-test",
+                    frame_index=0,
+                    name="process_data",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="search-test",
+                    frame_index=1,
+                    name="validate_data",
+                    self_weight=50,
+                    total_weight=50,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile)
+
+        # Substring match (no wildcards = contains)
+        results = storage.search_functions("data")
+        assert len(results) == 2
+        names = {r.name for r in results}
+        assert names == {"process_data", "validate_data"}
+
+    def test_search_with_wildcards(self, storage: ProfileStorage) -> None:
+        """Test searching with SQL wildcards."""
+        profile = Profile(
+            id="wildcard-test",
+            name="Wildcard Test",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="wildcard-test",
+                    frame_index=0,
+                    name="process_item",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="wildcard-test",
+                    frame_index=1,
+                    name="process_batch",
+                    self_weight=80,
+                    total_weight=80,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="wildcard-test",
+                    frame_index=2,
+                    name="validate_batch",
+                    self_weight=60,
+                    total_weight=60,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile)
+
+        # Prefix match
+        results = storage.search_functions("process_%")
+        assert len(results) == 2
+        names = {r.name for r in results}
+        assert names == {"process_item", "process_batch"}
+
+        # Suffix match
+        results = storage.search_functions("%_batch")
+        assert len(results) == 2
+        names = {r.name for r in results}
+        assert names == {"process_batch", "validate_batch"}
+
+    def test_search_scoped_to_profile(self, storage: ProfileStorage) -> None:
+        """Test searching within a specific profile."""
+        # Create two profiles with overlapping function names
+        profile1 = Profile(
+            id="p1",
+            name="Profile 1",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="p1",
+                    frame_index=0,
+                    name="shared_func",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+            ],
+        )
+        profile2 = Profile(
+            id="p2",
+            name="Profile 2",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="p2",
+                    frame_index=0,
+                    name="shared_func",
+                    self_weight=200,
+                    total_weight=200,
+                    call_count=2,
+                ),
+            ],
+        )
+        storage.create_profile(profile1)
+        storage.create_profile(profile2)
+
+        # Search across all profiles
+        all_results = storage.search_functions("shared")
+        assert len(all_results) == 2
+
+        # Search within specific profile
+        p1_results = storage.search_functions("shared", profile_id="p1")
+        assert len(p1_results) == 1
+        assert p1_results[0].self_weight == 100
+
+    def test_search_sorted_by_self_weight(self, storage: ProfileStorage) -> None:
+        """Test that results are sorted by self weight descending."""
+        profile = Profile(
+            id="sort-test",
+            name="Sort Test",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="sort-test",
+                    frame_index=0,
+                    name="slow_func",
+                    self_weight=300,
+                    total_weight=300,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="sort-test",
+                    frame_index=1,
+                    name="medium_func",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="sort-test",
+                    frame_index=2,
+                    name="fast_func",
+                    self_weight=50,
+                    total_weight=50,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile)
+
+        results = storage.search_functions("func")
+        assert len(results) == 3
+        assert results[0].name == "slow_func"
+        assert results[1].name == "medium_func"
+        assert results[2].name == "fast_func"
+
+    def test_search_with_limit(self, storage: ProfileStorage) -> None:
+        """Test that search respects limit parameter."""
+        profile = Profile(
+            id="limit-test",
+            name="Limit Test",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="limit-test",
+                    frame_index=i,
+                    name=f"func_{i}",
+                    self_weight=100 - i,
+                    total_weight=100 - i,
+                    call_count=1,
+                )
+                for i in range(10)
+            ],
+        )
+        storage.create_profile(profile)
+
+        results = storage.search_functions("func", limit=3)
+        assert len(results) == 3
+
+    def test_search_no_matches(self, storage: ProfileStorage) -> None:
+        """Test that search returns empty list when no matches."""
+        profile = Profile(
+            id="empty-test",
+            name="Empty Test",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="empty-test",
+                    frame_index=0,
+                    name="something",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile)
+
+        results = storage.search_functions("nonexistent")
+        assert results == []
+
+
+# =============================================================================
+# Function Trend Pattern Tests (CINT-24)
+# =============================================================================
+
+
+class TestFunctionTrendPatterns:
+    """Tests for pattern-based function_trend query."""
+
+    def test_trend_with_exact_name(self, storage: ProfileStorage) -> None:
+        """Test function trend with exact name match (existing behaviour)."""
+        for i in range(3):
+            profile = Profile(
+                id=f"trend-exact-{i}",
+                name=f"Trend Exact {i}",
+                profile_type=ProfileType.SAMPLED,
+                unit=ValueUnit.MILLISECONDS,
+                function_stats=[
+                    FunctionStats(
+                        profile_id=f"trend-exact-{i}",
+                        frame_index=0,
+                        name="tracked_func",
+                        self_weight=100 + (i * 10),
+                        total_weight=200 + (i * 10),
+                        call_count=5,
+                    )
+                ],
+            )
+            storage.create_profile(profile)
+
+        trend = storage.get_function_trend("tracked_func", limit=3)
+        assert len(trend) == 3
+
+    def test_trend_with_pattern(self, storage: ProfileStorage) -> None:
+        """Test function trend with wildcard pattern."""
+        # Create profiles with related functions
+        for i in range(2):
+            profile = Profile(
+                id=f"trend-pattern-{i}",
+                name=f"Trend Pattern {i}",
+                profile_type=ProfileType.SAMPLED,
+                unit=ValueUnit.MILLISECONDS,
+                function_stats=[
+                    FunctionStats(
+                        profile_id=f"trend-pattern-{i}",
+                        frame_index=0,
+                        name="process_a",
+                        self_weight=100 + (i * 10),
+                        total_weight=100 + (i * 10),
+                        call_count=1,
+                    ),
+                    FunctionStats(
+                        profile_id=f"trend-pattern-{i}",
+                        frame_index=1,
+                        name="process_b",
+                        self_weight=50 + (i * 5),
+                        total_weight=50 + (i * 5),
+                        call_count=1,
+                    ),
+                ],
+            )
+            storage.create_profile(profile)
+
+        # Match all "process_*" functions
+        trend = storage.get_function_trend("process_%", limit=10)
+        # 2 profiles × 2 functions = 4 entries
+        assert len(trend) == 4
+        for profile, stats in trend:
+            assert stats.name.startswith("process_")
+
+    def test_trend_pattern_vs_exact(self, storage: ProfileStorage) -> None:
+        """Test that patterns use LIKE while exact names use = for efficiency."""
+        profile = Profile(
+            id="pattern-vs-exact",
+            name="Pattern vs Exact",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="pattern-vs-exact",
+                    frame_index=0,
+                    name="test_func",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="pattern-vs-exact",
+                    frame_index=1,
+                    name="test_function",
+                    self_weight=50,
+                    total_weight=50,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile)
+
+        # Exact match should only return one
+        exact = storage.get_function_trend("test_func")
+        assert len(exact) == 1
+        assert exact[0][1].name == "test_func"
+
+        # Pattern match should return both
+        pattern = storage.get_function_trend("test_func%")
+        assert len(pattern) == 2

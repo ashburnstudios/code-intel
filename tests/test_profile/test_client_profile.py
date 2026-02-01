@@ -319,3 +319,57 @@ class TestClientHotCallers:
         # Should have profile data for "main"
         assert stats is not None
         assert stats.name == "main"
+
+
+class TestClientSearchFunctions:
+    """Tests for search_functions client method (CINT-24)."""
+
+    def test_search_functions(
+        self, client: CodeIntelClient, sampled_profile_path: Path
+    ) -> None:
+        """Test searching for functions through the client."""
+        client.ingest_profile(sampled_profile_path)
+
+        # Search for functions containing "process"
+        results = client.search_functions("process")
+        assert len(results) >= 1
+        assert any(r.name == "process_data" for r in results)
+
+    def test_search_functions_with_pattern(
+        self, client: CodeIntelClient, sampled_profile_path: Path
+    ) -> None:
+        """Test searching with SQL wildcards."""
+        client.ingest_profile(sampled_profile_path)
+
+        # Wildcard search
+        results = client.search_functions("calc%")
+        assert len(results) >= 1
+        assert any(r.name == "calculate" for r in results)
+
+    def test_search_functions_scoped_to_profile(
+        self, client: CodeIntelClient, sampled_profile_path: Path
+    ) -> None:
+        """Test searching within a specific profile."""
+        client.ingest_profile(sampled_profile_path)
+        profiles = client.list_profiles()
+        profile_id = profiles[0].id
+
+        results = client.search_functions("main", profile_id=profile_id)
+        assert len(results) == 1
+        assert results[0].profile_id == profile_id
+
+
+class TestClientFunctionTrendPatterns:
+    """Tests for pattern-based function_trend client method (CINT-24)."""
+
+    def test_function_trend_with_pattern(
+        self, client: CodeIntelClient, multi_profile_path: Path
+    ) -> None:
+        """Test function trend with wildcard pattern."""
+        client.ingest_profile(multi_profile_path)
+
+        # Match any function containing "function"
+        trend = client.function_trend("%function%", limit=10)
+        assert len(trend) >= 1
+        for profile, stats in trend:
+            assert "function" in stats.name.lower()

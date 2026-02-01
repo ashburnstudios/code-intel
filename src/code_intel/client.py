@@ -657,7 +657,7 @@ class CodeIntelClient:
 
     def function_trend(
         self,
-        function_name: str,
+        symbol_or_pattern: str,
         repo_path: Path | str | None = None,
         *,
         limit: int = 10,
@@ -668,7 +668,8 @@ class CodeIntelClient:
         across multiple profiling sessions.
 
         Args:
-            function_name: Name of the function to track.
+            symbol_or_pattern: Name or pattern of the function to track.
+                               Supports SQL wildcards (% for any, _ for single char).
             repo_path: Optional repository path filter.
             limit: Maximum number of profiles to include.
 
@@ -676,13 +677,17 @@ class CodeIntelClient:
             List of (Profile, FunctionStats) tuples, ordered by profile date.
 
         Example:
+            # Exact match
             trend = client.function_trend("process_data", limit=5)
             for profile, stats in trend:
                 print(f"{profile.name}: {stats.self_weight:.2f}ms")
+
+            # Pattern match - all functions starting with "process_"
+            trend = client.function_trend("process_%", limit=5)
         """
         repo_path_str = self._resolve_repo_path(repo_path) if repo_path else None
         return self._profile_storage.get_function_trend(
-            function_name, repo_path_str, limit=limit
+            symbol_or_pattern, repo_path_str, limit=limit
         )
 
     def hot_callers(
@@ -751,6 +756,41 @@ class CodeIntelClient:
         )
 
         return result
+
+    def search_functions(
+        self,
+        pattern: str,
+        *,
+        profile_id: str | None = None,
+        limit: int = 50,
+    ) -> list[FunctionStats]:
+        """Search for functions matching a pattern across profiles.
+
+        Useful for finding functions by partial name when you don't know
+        the exact function name from the profile.
+
+        Args:
+            pattern: Pattern to match against function names. Supports SQL
+                     wildcards (% for any, _ for single char). If no wildcards
+                     are present, matches anywhere in the name.
+            profile_id: Optional profile ID to scope the search.
+            limit: Maximum number of results.
+
+        Returns:
+            List of FunctionStats matching the pattern, sorted by self time.
+
+        Example:
+            # Find all functions containing "parse"
+            results = client.search_functions("parse")
+            for fn in results:
+                print(f"{fn.name}: {fn.self_percentage:.1f}%")
+
+            # Find functions starting with "process_"
+            results = client.search_functions("process_%")
+        """
+        return self._profile_storage.search_functions(
+            pattern, profile_id=profile_id, limit=limit
+        )
 
     # =========================================================================
     # Private methods
