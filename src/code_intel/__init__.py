@@ -1,6 +1,12 @@
 """Code-intel: Code graph intelligence for AI assistants."""
 
-from code_intel.client import CodeIntelClient, IndexResult, ProgressCallback, RepoStats
+from code_intel.client import (
+    CodeIntelClient,
+    IndexResult,
+    ProfileIngestResult,
+    ProgressCallback,
+    RepoStats,
+)
 from code_intel.graph.schema import (
     CodeGraph,
     EdgeKind,
@@ -30,6 +36,18 @@ from code_intel.parser.registry import (
     get_parser_for_file,
     register_parser,
 )
+from code_intel.profile import (
+    Frame,
+    FunctionDelta,
+    FunctionStats,
+    Profile,
+    ProfileComparison,
+    ProfileMetadata,
+    ProfileStorage,
+    ProfileType,
+    SpeedscopeParser,
+    ValueUnit,
+)
 
 __version__ = "0.1.0"
 
@@ -37,6 +55,7 @@ __all__ = [
     # Client
     "CodeIntelClient",
     "IndexResult",
+    "ProfileIngestResult",
     "ProgressCallback",
     "RepoStats",
     # Graph
@@ -67,4 +86,15 @@ __all__ = [
     "get_parser_for_file",
     "get_python_parser",
     "register_parser",
+    # Profile
+    "Frame",
+    "FunctionDelta",
+    "FunctionStats",
+    "Profile",
+    "ProfileComparison",
+    "ProfileMetadata",
+    "ProfileStorage",
+    "ProfileType",
+    "SpeedscopeParser",
+    "ValueUnit",
 ]

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://www.speedscope.app/file-format-schema.json",
+  "name": "multi_profile_test",
+  "shared": {
+    "frames": [
+      { "name": "main" },
+      { "name": "fast_function" },
+      { "name": "slow_function" }
+    ]
+  },
+  "profiles": [
+    {
+      "type": "sampled",
+      "name": "Baseline",
+      "unit": "milliseconds",
+      "startValue": 0,
+      "endValue": 100,
+      "samples": [[0, 1], [0, 2]],
+      "weights": [30, 70]
+    },
+    {
+      "type": "sampled",
+      "name": "After Optimisation",
+      "unit": "milliseconds",
+      "startValue": 0,
+      "endValue": 50,
+      "samples": [[0, 1], [0, 2]],
+      "weights": [20, 30]
+    }
+  ],
+  "activeProfileIndex": 0
+}
