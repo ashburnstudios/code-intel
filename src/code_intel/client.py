@@ -15,7 +15,9 @@ from code_intel.graph.schema import (
     NodeKind,
 )
 from code_intel.graph.storage import GraphStorage
+from code_intel.profile.correlation import ProfileCorrelator
 from code_intel.profile.schema import (
+    FrameSymbolMapping,
     FunctionStats,
     Profile,
     ProfileComparison,
@@ -151,6 +153,7 @@ class CodeIntelClient:
         self._storage = GraphStorage(db_path)
         self._profile_storage = ProfileStorage(db_path)
         self._speedscope_parser = SpeedscopeParser()
+        self._correlator = ProfileCorrelator(self._storage, self._profile_storage)
         self._parsers: dict[str, BaseParser] = {}
 
     def register_parser(self, parser: BaseParser) -> None:
@@ -793,95 +796,103 @@ class CodeIntelClient:
         )
 
     # =========================================================================
-    # Private methods
+    # Symbol Correlation Methods
     # =========================================================================
 
     def _correlate_profile_symbols(
         self,
         profile: Profile,
         repo_path: str,
+        *,
+        min_confidence: float = 0.5,
     ) -> int:
         """Correlate profile frames with code graph symbols.
 
-        Attempts to match each frame in the profile to a node in the code
-        graph based on function name and file path.
+        Uses the ProfileCorrelator for language-aware frame parsing and
+        multi-strategy symbol matching with confidence scoring.
 
         Args:
             profile: Profile to correlate.
             repo_path: Repository path for the code graph.
+            min_confidence: Minimum match confidence to accept (0.0-1.0).
 
         Returns:
             Number of frames successfully correlated.
         """
-        correlations: dict[int, str] = {}
+        return self._correlator.correlate_profile(
+            profile.id,
+            repo_path,
+            min_confidence=min_confidence,
+        )
 
-        for idx, frame in enumerate(profile.frames):
-            # Try to find a matching symbol
-            symbol_id = self._find_symbol_for_frame(frame, repo_path)
-            if symbol_id:
-                correlations[idx] = symbol_id
+    def correlate_frame(
+        self,
+        frame_name: str,
+        repo_path: Path | str,
+        *,
+        file: str | None = None,
+        line: int | None = None,
+        use_cache: bool = True,
+        min_confidence: float = 0.5,
+    ) -> FrameSymbolMapping | None:
+        """Correlate a single frame name to a code symbol.
 
-        if correlations:
-            self._profile_storage.update_symbol_correlations(
-                profile.id, correlations
-            )
-
-        return len(correlations)
-
-    def _find_symbol_for_frame(self, frame, repo_path: str) -> str | None:
-        """Find a code graph symbol matching a profile frame.
-
-        Uses multiple strategies:
-        1. If file+line available, find symbol at that location
-        2. Match by function name
-        3. Match by qualified name patterns
+        This is useful for manually correlating frames or debugging
+        correlation issues.
 
         Args:
-            frame: Profile frame to match.
-            repo_path: Repository path for scoping.
+            frame_name: The raw frame name from a profile.
+            repo_path: Repository path for scoping symbol search.
+            file: Optional file path from the frame.
+            line: Optional line number from the frame.
+            use_cache: Whether to check/update the mapping cache.
+            min_confidence: Minimum confidence to accept a match.
 
         Returns:
-            Node ID if found, None otherwise.
+            FrameSymbolMapping if correlated, None otherwise.
+
+        Example:
+            mapping = client.correlate_frame(
+                "MyApp.Services.UserService.GetUser(int)",
+                repo_path="/path/to/repo",
+            )
+            if mapping:
+                print(f"Matched to {mapping.symbol_id} with {mapping.confidence}")
         """
-        # Parse the frame name to get a searchable symbol
-        name = frame.to_qualified_name()
+        repo_path_str = self._resolve_repo_path(repo_path)
+        return self._correlator.correlate_frame(
+            frame_name,
+            repo_path_str,
+            file=file,
+            line=line,
+            use_cache=use_cache,
+            min_confidence=min_confidence,
+        )
 
-        # Extract the simple function name (last component)
-        simple_name = name.split(".")[-1] if "." in name else name
+    def get_unmapped_frames(
+        self,
+        profile_id: str | None = None,
+    ) -> list[str]:
+        """Get frame names that haven't been mapped to symbols.
 
-        # Strategy 1: If we have file info, find by location
-        if frame.file and frame.line:
-            nodes = self._storage.get_nodes_by_file(frame.file, repo_path)
-            for node in nodes:
-                if node.location.start_line == frame.line:
-                    return node.id
-                # Also check if the line is within the node's range
-                if (
-                    node.location.start_line <= frame.line
-                    and node.location.end_line >= frame.line
-                    and node.name == simple_name
-                ):
-                    return node.id
+        Useful for identifying frames that need manual correlation or
+        further investigation.
 
-        # Strategy 2: Match by simple name
-        nodes = self._storage.get_nodes_by_name(simple_name, repo_path)
-        if len(nodes) == 1:
-            return nodes[0].id
+        Args:
+            profile_id: Optional profile to scope the search.
 
-        # Strategy 3: If multiple matches, try qualified name
-        if len(nodes) > 1:
-            for node in nodes:
-                if node.qualified_name and node.qualified_name == name:
-                    return node.id
-                # Check if qualified name ends with our search name
-                if node.qualified_name and node.qualified_name.endswith(f".{name}"):
-                    return node.id
+        Returns:
+            List of unmapped frame names.
+        """
+        return self._correlator.get_unmapped_frames(profile_id)
 
-        # Strategy 4: Return first match if any
-        if nodes:
-            return nodes[0].id
+    def clear_correlation_cache(self) -> int:
+        """Clear all cached frame-symbol mappings.
 
-        return None
+        Returns:
+            Number of mappings cleared.
+        """
+        return self._correlator.clear_cache()
 
     # =========================================================================
     # Private methods (continued)
