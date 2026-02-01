@@ -10,6 +10,7 @@ from typing import Iterator
 
 from code_intel.profile.schema import (
     Frame,
+    FrameSymbolMapping,
     FunctionDelta,
     FunctionStats,
     Profile,
@@ -20,7 +21,7 @@ from code_intel.profile.schema import (
 )
 
 # Schema version for migration support
-PROFILE_SCHEMA_VERSION = 1
+PROFILE_SCHEMA_VERSION = 2
 
 # SQL statements for schema creation
 _CREATE_PROFILE_SCHEMA = """
@@ -73,6 +74,14 @@ CREATE TABLE IF NOT EXISTS function_stats (
     UNIQUE(profile_id, frame_index)
 );
 
+-- Frame symbol mappings table: caches frame name to code graph symbol correlation
+CREATE TABLE IF NOT EXISTS frame_symbol_mappings (
+    frame_name TEXT PRIMARY KEY,
+    symbol_id TEXT,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for efficient querying
 CREATE INDEX IF NOT EXISTS idx_profiles_repo ON profiles(repo_path);
 CREATE INDEX IF NOT EXISTS idx_profiles_created ON profiles(created_at);
@@ -83,6 +92,8 @@ CREATE INDEX IF NOT EXISTS idx_stats_name ON function_stats(name);
 CREATE INDEX IF NOT EXISTS idx_stats_self_weight ON function_stats(self_weight DESC);
 CREATE INDEX IF NOT EXISTS idx_stats_total_weight ON function_stats(total_weight DESC);
 CREATE INDEX IF NOT EXISTS idx_stats_symbol ON function_stats(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_mappings_symbol ON frame_symbol_mappings(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_mappings_confidence ON frame_symbol_mappings(confidence);
 """
 
 
@@ -173,8 +184,24 @@ class ProfileStorage:
         self, conn: sqlite3.Connection, from_version: int, to_version: int
     ) -> None:
         """Run schema migrations between versions."""
-        # Future migrations will be added here
-        pass
+        # Migration from version 1 to 2: add frame_symbol_mappings table
+        if from_version < 2 <= to_version:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS frame_symbol_mappings (
+                    frame_name TEXT PRIMARY KEY,
+                    symbol_id TEXT,
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mappings_symbol "
+                "ON frame_symbol_mappings(symbol_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mappings_confidence "
+                "ON frame_symbol_mappings(confidence)"
+            )
 
     # =========================================================================
     # Profile CRUD
@@ -714,6 +741,199 @@ class ProfileStorage:
                 )
                 count += cursor.rowcount
         return count
+
+    # =========================================================================
+    # Frame Symbol Mapping Methods
+    # =========================================================================
+
+    def get_symbol_mapping(self, frame_name: str) -> FrameSymbolMapping | None:
+        """Get the cached symbol mapping for a frame name.
+
+        Args:
+            frame_name: The frame name to look up.
+
+        Returns:
+            FrameSymbolMapping if found, None otherwise.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM frame_symbol_mappings WHERE frame_name = ?",
+                (frame_name,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return FrameSymbolMapping(
+                frame_name=row["frame_name"],
+                symbol_id=row["symbol_id"],
+                confidence=row["confidence"],
+                last_updated=row["last_updated"],
+            )
+
+    def set_symbol_mapping(
+        self,
+        frame_name: str,
+        symbol_id: str | None,
+        *,
+        confidence: float = 1.0,
+    ) -> None:
+        """Set or update the symbol mapping for a frame name.
+
+        Args:
+            frame_name: The frame name to map.
+            symbol_id: ID of the code graph symbol (None to clear mapping).
+            confidence: Match confidence (0.0-1.0, default 1.0 for exact match).
+        """
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO frame_symbol_mappings
+                    (frame_name, symbol_id, confidence, last_updated)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (frame_name, symbol_id, confidence),
+            )
+
+    def get_symbol_mappings(
+        self,
+        *,
+        min_confidence: float | None = None,
+        limit: int | None = None,
+    ) -> list[FrameSymbolMapping]:
+        """Get all symbol mappings, optionally filtered.
+
+        Args:
+            min_confidence: Only return mappings with confidence >= this value.
+            limit: Maximum number of results.
+
+        Returns:
+            List of FrameSymbolMapping objects.
+        """
+        query = "SELECT * FROM frame_symbol_mappings"
+        params: list[float | int] = []
+
+        if min_confidence is not None:
+            query += " WHERE confidence >= ?"
+            params.append(min_confidence)
+
+        query += " ORDER BY last_updated DESC"
+
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [
+                FrameSymbolMapping(
+                    frame_name=row["frame_name"],
+                    symbol_id=row["symbol_id"],
+                    confidence=row["confidence"],
+                    last_updated=row["last_updated"],
+                )
+                for row in cursor.fetchall()
+            ]
+
+    def delete_symbol_mapping(self, frame_name: str) -> bool:
+        """Delete a symbol mapping.
+
+        Args:
+            frame_name: The frame name to delete mapping for.
+
+        Returns:
+            True if deleted, False if not found.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM frame_symbol_mappings WHERE frame_name = ?",
+                (frame_name,),
+            )
+            return cursor.rowcount > 0
+
+    def clear_symbol_mappings(self) -> int:
+        """Clear all symbol mappings.
+
+        Returns:
+            Number of mappings deleted.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM frame_symbol_mappings")
+            return cursor.rowcount
+
+    def get_unmapped_frames(
+        self,
+        profile_id: str | None = None,
+        *,
+        limit: int | None = None,
+    ) -> list[str]:
+        """Get frame names that don't have symbol mappings.
+
+        Useful for identifying frames that need correlation.
+
+        Args:
+            profile_id: Optional profile ID to scope the search.
+            limit: Maximum number of results.
+
+        Returns:
+            List of frame names without mappings.
+        """
+        if profile_id:
+            query = """
+                SELECT DISTINCT fs.name
+                FROM function_stats fs
+                LEFT JOIN frame_symbol_mappings m ON fs.name = m.frame_name
+                WHERE fs.profile_id = ? AND m.frame_name IS NULL
+                ORDER BY fs.name
+            """
+            params: list[str | int] = [profile_id]
+        else:
+            query = """
+                SELECT DISTINCT fs.name
+                FROM function_stats fs
+                LEFT JOIN frame_symbol_mappings m ON fs.name = m.frame_name
+                WHERE m.frame_name IS NULL
+                ORDER BY fs.name
+            """
+            params = []
+
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return [row["name"] for row in cursor.fetchall()]
+
+    def apply_mappings_to_profile(self, profile_id: str) -> int:
+        """Apply cached symbol mappings to a profile's function stats.
+
+        Updates function_stats.symbol_id from frame_symbol_mappings
+        where names match.
+
+        Args:
+            profile_id: ID of the profile to update.
+
+        Returns:
+            Number of stats updated.
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE function_stats
+                SET symbol_id = (
+                    SELECT symbol_id FROM frame_symbol_mappings
+                    WHERE frame_name = function_stats.name
+                )
+                WHERE profile_id = ?
+                  AND EXISTS (
+                    SELECT 1 FROM frame_symbol_mappings
+                    WHERE frame_name = function_stats.name
+                      AND symbol_id IS NOT NULL
+                  )
+                """,
+                (profile_id,),
+            )
+            return cursor.rowcount
 
     # =========================================================================
     # Helper Methods

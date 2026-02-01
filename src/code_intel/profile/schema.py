@@ -208,6 +208,31 @@ class FunctionDelta(BaseModel):
     )
 
 
+class FrameSymbolMapping(BaseModel):
+    """Cached mapping between a frame name and a code graph symbol.
+
+    This caches the correlation between profile frame names (from speedscope, etc.)
+    and code-intel symbol node IDs. The cache allows reuse across profiles and
+    tracks the confidence of fuzzy matches.
+    """
+
+    frame_name: str = Field(description="The frame name as it appears in profiles")
+    symbol_id: str | None = Field(
+        default=None,
+        description="ID of the corresponding node in the code graph",
+    )
+    confidence: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Match confidence (1.0 = exact, lower = fuzzy)",
+    )
+    last_updated: str | None = Field(
+        default=None,
+        description="ISO8601 timestamp of last update",
+    )
+
+
 class ProfileComparison(BaseModel):
     """Comparison between two profiles."""
 
