@@ -6,6 +6,7 @@ import pytest
 
 from code_intel.profile.schema import (
     Frame,
+    FrameSymbolMapping,
     FunctionStats,
     Profile,
     ProfileMetadata,
@@ -556,3 +557,266 @@ class TestProfileStorage:
         results = storage.get_functions_by_symbol("symbol-123")
         assert len(results) == 1
         assert results[0][1].name == "main"
+
+
+# =============================================================================
+# Frame Symbol Mapping Tests
+# =============================================================================
+
+
+class TestFrameSymbolMapping:
+    """Tests for FrameSymbolMapping schema."""
+
+    def test_creation_with_defaults(self) -> None:
+        """Test creating a mapping with default values."""
+        mapping = FrameSymbolMapping(frame_name="MyClass.Method")
+        assert mapping.frame_name == "MyClass.Method"
+        assert mapping.symbol_id is None
+        assert mapping.confidence == 1.0
+        assert mapping.last_updated is None
+
+    def test_creation_with_all_fields(self) -> None:
+        """Test creating a mapping with all fields."""
+        mapping = FrameSymbolMapping(
+            frame_name="MyClass.Method",
+            symbol_id="node-123",
+            confidence=0.85,
+            last_updated="2026-01-30T12:00:00Z",
+        )
+        assert mapping.frame_name == "MyClass.Method"
+        assert mapping.symbol_id == "node-123"
+        assert mapping.confidence == 0.85
+        assert mapping.last_updated == "2026-01-30T12:00:00Z"
+
+    def test_confidence_validation(self) -> None:
+        """Test that confidence is validated to 0.0-1.0 range."""
+        # Valid values
+        FrameSymbolMapping(frame_name="test", confidence=0.0)
+        FrameSymbolMapping(frame_name="test", confidence=0.5)
+        FrameSymbolMapping(frame_name="test", confidence=1.0)
+
+        # Invalid values should raise
+        with pytest.raises(ValueError):
+            FrameSymbolMapping(frame_name="test", confidence=-0.1)
+        with pytest.raises(ValueError):
+            FrameSymbolMapping(frame_name="test", confidence=1.1)
+
+
+class TestFrameSymbolMappingStorage:
+    """Tests for frame symbol mapping storage operations."""
+
+    def test_set_and_get_mapping(self, storage: ProfileStorage) -> None:
+        """Test setting and retrieving a symbol mapping."""
+        storage.set_symbol_mapping("main", "node-main-123")
+
+        mapping = storage.get_symbol_mapping("main")
+        assert mapping is not None
+        assert mapping.frame_name == "main"
+        assert mapping.symbol_id == "node-main-123"
+        assert mapping.confidence == 1.0
+        assert mapping.last_updated is not None
+
+    def test_set_mapping_with_confidence(self, storage: ProfileStorage) -> None:
+        """Test setting a mapping with custom confidence."""
+        storage.set_symbol_mapping("fuzzy_match", "node-456", confidence=0.75)
+
+        mapping = storage.get_symbol_mapping("fuzzy_match")
+        assert mapping is not None
+        assert mapping.confidence == 0.75
+
+    def test_update_existing_mapping(self, storage: ProfileStorage) -> None:
+        """Test that setting a mapping updates an existing one."""
+        storage.set_symbol_mapping("func", "old-symbol")
+        storage.set_symbol_mapping("func", "new-symbol", confidence=0.9)
+
+        mapping = storage.get_symbol_mapping("func")
+        assert mapping is not None
+        assert mapping.symbol_id == "new-symbol"
+        assert mapping.confidence == 0.9
+
+    def test_get_nonexistent_mapping(self, storage: ProfileStorage) -> None:
+        """Test getting a mapping that doesn't exist."""
+        mapping = storage.get_symbol_mapping("nonexistent")
+        assert mapping is None
+
+    def test_delete_mapping(self, storage: ProfileStorage) -> None:
+        """Test deleting a symbol mapping."""
+        storage.set_symbol_mapping("to_delete", "node-123")
+        assert storage.get_symbol_mapping("to_delete") is not None
+
+        deleted = storage.delete_symbol_mapping("to_delete")
+        assert deleted is True
+        assert storage.get_symbol_mapping("to_delete") is None
+
+    def test_delete_nonexistent_mapping(self, storage: ProfileStorage) -> None:
+        """Test deleting a nonexistent mapping returns False."""
+        deleted = storage.delete_symbol_mapping("nonexistent")
+        assert deleted is False
+
+    def test_get_all_mappings(self, storage: ProfileStorage) -> None:
+        """Test listing all mappings."""
+        storage.set_symbol_mapping("func1", "node-1", confidence=1.0)
+        storage.set_symbol_mapping("func2", "node-2", confidence=0.8)
+        storage.set_symbol_mapping("func3", "node-3", confidence=0.6)
+
+        mappings = storage.get_symbol_mappings()
+        assert len(mappings) == 3
+
+    def test_get_mappings_with_min_confidence(self, storage: ProfileStorage) -> None:
+        """Test filtering mappings by minimum confidence."""
+        storage.set_symbol_mapping("high", "node-1", confidence=1.0)
+        storage.set_symbol_mapping("medium", "node-2", confidence=0.7)
+        storage.set_symbol_mapping("low", "node-3", confidence=0.4)
+
+        mappings = storage.get_symbol_mappings(min_confidence=0.6)
+        assert len(mappings) == 2
+        names = {m.frame_name for m in mappings}
+        assert names == {"high", "medium"}
+
+    def test_get_mappings_with_limit(self, storage: ProfileStorage) -> None:
+        """Test limiting mapping results."""
+        for i in range(5):
+            storage.set_symbol_mapping(f"func{i}", f"node-{i}")
+
+        mappings = storage.get_symbol_mappings(limit=3)
+        assert len(mappings) == 3
+
+    def test_clear_all_mappings(self, storage: ProfileStorage) -> None:
+        """Test clearing all mappings."""
+        storage.set_symbol_mapping("func1", "node-1")
+        storage.set_symbol_mapping("func2", "node-2")
+
+        count = storage.clear_symbol_mappings()
+        assert count == 2
+        assert storage.get_symbol_mappings() == []
+
+    def test_get_unmapped_frames(
+        self, storage: ProfileStorage, sample_profile: Profile
+    ) -> None:
+        """Test finding frames without symbol mappings."""
+        storage.create_profile(sample_profile)
+
+        # Initially, both frames are unmapped
+        unmapped = storage.get_unmapped_frames()
+        assert len(unmapped) == 2
+        assert set(unmapped) == {"main", "helper"}
+
+        # Map one frame
+        storage.set_symbol_mapping("main", "node-main")
+
+        # Now only helper is unmapped
+        unmapped = storage.get_unmapped_frames()
+        assert unmapped == ["helper"]
+
+    def test_get_unmapped_frames_by_profile(
+        self, storage: ProfileStorage
+    ) -> None:
+        """Test finding unmapped frames scoped to a specific profile."""
+        # Create two profiles with different functions
+        profile1 = Profile(
+            id="p1",
+            name="Profile 1",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="p1",
+                    frame_index=0,
+                    name="func_a",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+            ],
+        )
+        profile2 = Profile(
+            id="p2",
+            name="Profile 2",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="p2",
+                    frame_index=0,
+                    name="func_b",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile1)
+        storage.create_profile(profile2)
+
+        # Map func_a
+        storage.set_symbol_mapping("func_a", "node-a")
+
+        # Unmapped for p1 should be empty
+        unmapped_p1 = storage.get_unmapped_frames(profile_id="p1")
+        assert unmapped_p1 == []
+
+        # Unmapped for p2 should contain func_b
+        unmapped_p2 = storage.get_unmapped_frames(profile_id="p2")
+        assert unmapped_p2 == ["func_b"]
+
+    def test_apply_mappings_to_profile(
+        self, storage: ProfileStorage, sample_profile: Profile
+    ) -> None:
+        """Test applying cached mappings to a profile."""
+        storage.create_profile(sample_profile)
+
+        # Create mappings
+        storage.set_symbol_mapping("main", "node-main-xyz")
+        storage.set_symbol_mapping("helper", "node-helper-abc")
+
+        # Apply mappings
+        count = storage.apply_mappings_to_profile(sample_profile.id)
+        assert count == 2
+
+        # Verify mappings were applied
+        profile = storage.get_profile(sample_profile.id)
+        assert profile is not None
+        stats_by_name = {s.name: s for s in profile.function_stats}
+        assert stats_by_name["main"].symbol_id == "node-main-xyz"
+        assert stats_by_name["helper"].symbol_id == "node-helper-abc"
+
+    def test_apply_mappings_partial(self, storage: ProfileStorage) -> None:
+        """Test applying mappings when only some frames are mapped."""
+        profile = Profile(
+            id="partial-test",
+            name="Partial Test",
+            profile_type=ProfileType.SAMPLED,
+            unit=ValueUnit.MILLISECONDS,
+            function_stats=[
+                FunctionStats(
+                    profile_id="partial-test",
+                    frame_index=0,
+                    name="mapped_func",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+                FunctionStats(
+                    profile_id="partial-test",
+                    frame_index=1,
+                    name="unmapped_func",
+                    self_weight=100,
+                    total_weight=100,
+                    call_count=1,
+                ),
+            ],
+        )
+        storage.create_profile(profile)
+
+        # Only map one function
+        storage.set_symbol_mapping("mapped_func", "node-mapped")
+
+        count = storage.apply_mappings_to_profile("partial-test")
+        assert count == 1
+
+        # Verify
+        result = storage.get_profile("partial-test")
+        assert result is not None
+        stats_by_name = {s.name: s for s in result.function_stats}
+        assert stats_by_name["mapped_func"].symbol_id == "node-mapped"
+        assert stats_by_name["unmapped_func"].symbol_id is None

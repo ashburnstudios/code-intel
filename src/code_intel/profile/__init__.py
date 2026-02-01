@@ -6,6 +6,7 @@ performance profile data (e.g., from speedscope, py-spy, dotnet-trace).
 
 from code_intel.profile.schema import (
     Frame,
+    FrameSymbolMapping,
     FunctionDelta,
     FunctionStats,
     Profile,
@@ -20,6 +21,7 @@ from code_intel.profile.storage import ProfileStorage
 __all__ = [
     # Schema
     "Frame",
+    "FrameSymbolMapping",
     "FunctionDelta",
     "FunctionStats",
     "Profile",

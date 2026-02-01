@@ -38,6 +38,7 @@ from code_intel.parser.registry import (
 )
 from code_intel.profile import (
     Frame,
+    FrameSymbolMapping,
     FunctionDelta,
     FunctionStats,
     Profile,
@@ -88,6 +89,7 @@ __all__ = [
     "register_parser",
     # Profile
     "Frame",
+    "FrameSymbolMapping",
     "FunctionDelta",
     "FunctionStats",
     "Profile",
