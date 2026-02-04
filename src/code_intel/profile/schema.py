@@ -266,3 +266,146 @@ class ProfileComparison(BaseModel):
         default_factory=list,
         description="Functions only in 'before' profile",
     )
+
+
+# =============================================================================
+# Temporal Analysis Models (CINT-27)
+# =============================================================================
+
+
+class QuartileTrend(BaseModel):
+    """Performance trend across time quartiles within a single profile.
+
+    Used to detect within-session degradation by comparing early (Q1) vs
+    late (Q4) execution periods.
+    """
+
+    function: str = Field(description="Function name")
+    file: str | None = Field(default=None, description="Source file path")
+    q1_avg_ms: float = Field(description="Average time in first quartile (ms)")
+    q2_avg_ms: float = Field(description="Average time in second quartile (ms)")
+    q3_avg_ms: float = Field(description="Average time in third quartile (ms)")
+    q4_avg_ms: float = Field(description="Average time in fourth quartile (ms)")
+    degradation_factor: float = Field(
+        description="Ratio of Q4 to Q1 time (>1 means slower over time)"
+    )
+    sample_count: int = Field(
+        default=0, description="Total number of samples for this function"
+    )
+    is_degraded: bool = Field(
+        default=False,
+        description="True if function shows significant degradation (Q4/Q1 > threshold)",
+    )
+
+
+class DegradationReport(BaseModel):
+    """Report of within-session performance degradation.
+
+    Analyses a single profile by splitting it into time quartiles
+    to detect functions that get slower during execution.
+    """
+
+    profile_id: str = Field(description="ID of the analysed profile")
+    profile_name: str = Field(description="Name of the analysed profile")
+    has_degradation: bool = Field(
+        description="True if any significant degradation detected"
+    )
+    degraded_functions: list[QuartileTrend] = Field(
+        default_factory=list,
+        description="Functions showing degradation (sorted by severity)",
+    )
+    stable_functions: list[QuartileTrend] = Field(
+        default_factory=list,
+        description="Functions with consistent performance",
+    )
+    total_functions_analysed: int = Field(
+        default=0, description="Total functions analysed"
+    )
+    degradation_threshold: float = Field(
+        default=1.5, description="Q4/Q1 ratio threshold used for detection"
+    )
+    summary: str = Field(default="", description="Human-readable summary for LLMs")
+
+
+class Regression(BaseModel):
+    """A performance regression between a baseline and comparison profile."""
+
+    function: str = Field(description="Function name")
+    file: str | None = Field(default=None, description="Source file path")
+    baseline_self_ms: float = Field(description="Self time in baseline (ms)")
+    comparison_self_ms: float = Field(description="Self time in comparison (ms)")
+    change_pct: float = Field(description="Percentage change in self time")
+    absolute_change_ms: float = Field(description="Absolute change in self time (ms)")
+    baseline_profile_id: str = Field(description="ID of the baseline profile")
+    comparison_profile_id: str = Field(description="ID of the comparison profile")
+    comparison_commit: str | None = Field(
+        default=None, description="Commit SHA of comparison profile"
+    )
+    is_significant: bool = Field(
+        default=True, description="True if regression exceeds threshold"
+    )
+
+
+class RegressionReport(BaseModel):
+    """Report of regressions across multiple profiles compared to a baseline."""
+
+    baseline_profile_id: str = Field(description="ID of the baseline profile")
+    baseline_profile_name: str = Field(description="Name of the baseline profile")
+    baseline_commit: str | None = Field(
+        default=None, description="Commit SHA of baseline profile"
+    )
+    comparison_count: int = Field(description="Number of profiles compared")
+    regressions: list[Regression] = Field(
+        default_factory=list,
+        description="Detected regressions (sorted by severity)",
+    )
+    improvements: list[Regression] = Field(
+        default_factory=list,
+        description="Detected improvements (sorted by impact)",
+    )
+    threshold_pct: float = Field(
+        default=20.0, description="Percentage threshold used for detection"
+    )
+    summary: str = Field(default="", description="Human-readable summary for LLMs")
+
+
+class Anomaly(BaseModel):
+    """A function with anomalous timing variance."""
+
+    function: str = Field(description="Function name")
+    file: str | None = Field(default=None, description="Source file path")
+    mean_ms: float = Field(description="Mean execution time (ms)")
+    std_dev_ms: float = Field(description="Standard deviation (ms)")
+    min_ms: float = Field(description="Minimum execution time (ms)")
+    max_ms: float = Field(description="Maximum execution time (ms)")
+    coefficient_of_variation: float = Field(
+        description="CV = std_dev / mean (higher = more variable)"
+    )
+    sample_count: int = Field(description="Number of samples")
+    profile_id: str = Field(description="ID of the source profile")
+    severity: str = Field(
+        default="medium",
+        description="Anomaly severity: 'low', 'medium', 'high'",
+    )
+
+
+class AnomalyReport(BaseModel):
+    """Report of functions with unusual timing variance."""
+
+    profile_id: str = Field(description="ID of the analysed profile")
+    profile_name: str = Field(description="Name of the analysed profile")
+    anomalies: list[Anomaly] = Field(
+        default_factory=list,
+        description="Functions with high variance (sorted by severity)",
+    )
+    cv_threshold: float = Field(
+        default=0.5,
+        description="Coefficient of variation threshold used for detection",
+    )
+    min_samples: int = Field(
+        default=5, description="Minimum samples required for analysis"
+    )
+    total_functions_analysed: int = Field(
+        default=0, description="Total functions analysed"
+    )
+    summary: str = Field(default="", description="Human-readable summary for LLMs")

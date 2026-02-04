@@ -49,6 +49,15 @@ from code_intel.profile import (
     SpeedscopeParser,
     ValueUnit,
 )
+from code_intel.profile.schema import (
+    Anomaly,
+    AnomalyReport,
+    DegradationReport,
+    QuartileTrend,
+    Regression,
+    RegressionReport,
+)
+from code_intel.profile.temporal import TemporalAnalyser
 from code_intel.profile.correlation import (
     FrameLanguage,
     FrameNormaliser,
@@ -109,6 +118,14 @@ __all__ = [
     "ProfileType",
     "SpeedscopeParser",
     "ValueUnit",
+    # Temporal Analysis (CINT-27)
+    "Anomaly",
+    "AnomalyReport",
+    "DegradationReport",
+    "QuartileTrend",
+    "Regression",
+    "RegressionReport",
+    "TemporalAnalyser",
     # Correlation
     "FrameLanguage",
     "FrameNormaliser",
