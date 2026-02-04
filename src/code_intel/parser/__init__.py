@@ -50,6 +50,19 @@ def get_xaml_parser():
     return XamlParser()
 
 
+def get_go_parser():
+    """Get the Go parser instance.
+
+    Returns:
+        GoParser instance.
+
+    Raises:
+        ImportError: If tree-sitter-go is not installed.
+    """
+    from code_intel.parser.go import GoParser
+    return GoParser()
+
+
 __all__ = [
     # Base classes and dataclasses
     "BaseParser",
@@ -66,4 +79,5 @@ __all__ = [
     "get_python_parser",
     "get_csharp_parser",
     "get_xaml_parser",
+    "get_go_parser",
 ]
