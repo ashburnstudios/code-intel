@@ -76,6 +76,19 @@ def get_php_parser():
     return PHPParser()
 
 
+def get_typescript_parser():
+    """Get the TypeScript/JavaScript parser instance.
+
+    Returns:
+        TypeScriptParser instance.
+
+    Raises:
+        ImportError: If tree-sitter-typescript is not installed.
+    """
+    from code_intel.parser.typescript import TypeScriptParser
+    return TypeScriptParser()
+
+
 __all__ = [
     # Base classes and dataclasses
     "BaseParser",
@@ -94,4 +107,5 @@ __all__ = [
     "get_xaml_parser",
     "get_go_parser",
     "get_php_parser",
+    "get_typescript_parser",
 ]
