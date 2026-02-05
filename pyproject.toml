@@ -56,11 +56,15 @@ csharp = [
 go = [
     "tree-sitter-go>=0.21.0",
 ]
+php = [
+    "tree-sitter-php>=0.22.0",
+]
 all-languages = [
     "tree-sitter-typescript>=0.21.0",
     "tree-sitter-python>=0.21.0",
     "tree-sitter-c-sharp>=0.21.0",
     "tree-sitter-go>=0.21.0",
+    "tree-sitter-php>=0.22.0",
 ]
 # Streaming JSON support for large profile files (>100MB)
 streaming = [
