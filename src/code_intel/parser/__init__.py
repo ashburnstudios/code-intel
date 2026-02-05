@@ -63,6 +63,19 @@ def get_go_parser():
     return GoParser()
 
 
+def get_php_parser():
+    """Get the PHP parser instance.
+
+    Returns:
+        PHPParser instance.
+
+    Raises:
+        ImportError: If tree-sitter-php is not installed.
+    """
+    from code_intel.parser.php import PHPParser
+    return PHPParser()
+
+
 __all__ = [
     # Base classes and dataclasses
     "BaseParser",
@@ -80,4 +93,5 @@ __all__ = [
     "get_csharp_parser",
     "get_xaml_parser",
     "get_go_parser",
+    "get_php_parser",
 ]
