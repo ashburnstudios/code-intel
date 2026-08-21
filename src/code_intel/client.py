@@ -17,14 +17,18 @@ from code_intel.graph.schema import (
 from code_intel.graph.storage import GraphStorage
 from code_intel.profile.correlation import ProfileCorrelator
 from code_intel.profile.schema import (
+    AnomalyReport,
+    DegradationReport,
     FrameSymbolMapping,
     FunctionStats,
     Profile,
     ProfileComparison,
     ProfileMetadata,
+    RegressionReport,
 )
 from code_intel.profile.speedscope import SpeedscopeParser
 from code_intel.profile.storage import ProfileStorage
+from code_intel.profile.temporal import TemporalAnalyser
 
 if TYPE_CHECKING:
     from code_intel.parser.base import BaseParser
@@ -154,6 +158,7 @@ class CodeIntelClient:
         self._profile_storage = ProfileStorage(db_path)
         self._speedscope_parser = SpeedscopeParser()
         self._correlator = ProfileCorrelator(self._storage, self._profile_storage)
+        self._temporal_analyser = TemporalAnalyser(self._profile_storage)
         self._parsers: dict[str, BaseParser] = {}
 
     def register_parser(self, parser: BaseParser) -> None:
@@ -793,6 +798,121 @@ class CodeIntelClient:
         """
         return self._profile_storage.search_functions(
             pattern, profile_id=profile_id, limit=limit
+        )
+
+    # =========================================================================
+    # Temporal Analysis Methods (CINT-27)
+    # =========================================================================
+
+    def analyse_degradation(
+        self,
+        profile_id: str,
+        *,
+        degradation_threshold: float = 1.5,
+        min_samples: int = 4,
+    ) -> DegradationReport:
+        """Detect within-session performance degradation.
+
+        Splits the profile into time quartiles and compares early (Q1)
+        vs late (Q4) execution to detect functions that slow down over time.
+
+        This is useful for detecting memory leaks, cache exhaustion,
+        or resource contention that develops during execution.
+
+        Args:
+            profile_id: ID of the profile to analyse.
+            degradation_threshold: Q4/Q1 ratio above which a function is
+                                   considered degraded. Default 1.5 (50% slower).
+            min_samples: Minimum samples required per quartile for a function
+                        to be included in analysis. Default 4.
+
+        Returns:
+            DegradationReport with analysis results and human-readable summary.
+
+        Example:
+            report = client.analyse_degradation(profile_id)
+            if report.has_degradation:
+                for fn in report.degraded_functions[:5]:
+                    print(f"{fn.function}: {fn.degradation_factor:.2f}x slower")
+            print(report.summary)  # LLM-friendly summary
+        """
+        return self._temporal_analyser.analyse_degradation(
+            profile_id,
+            degradation_threshold=degradation_threshold,
+            min_samples=min_samples,
+        )
+
+    def detect_regressions(
+        self,
+        baseline_id: str,
+        comparison_ids: list[str],
+        *,
+        threshold_pct: float = 20.0,
+    ) -> RegressionReport:
+        """Detect performance regressions across multiple profiles.
+
+        Compares a baseline profile against one or more comparison profiles
+        to identify functions that have regressed or improved. Useful for
+        CI/CD pipelines and tracking performance across commits.
+
+        Args:
+            baseline_id: ID of the baseline profile.
+            comparison_ids: IDs of profiles to compare against baseline.
+            threshold_pct: Minimum percentage change to flag as regression/improvement.
+                          Default 20%.
+
+        Returns:
+            RegressionReport with detected regressions, improvements, and summary.
+
+        Example:
+            report = client.detect_regressions(
+                baseline_id="v1.0",
+                comparison_ids=["v1.1", "v1.2"],
+                threshold_pct=10.0,
+            )
+            for reg in report.regressions:
+                print(f"REGRESSION: {reg.function} +{reg.change_pct:.1f}%")
+            print(report.summary)  # LLM-friendly summary
+        """
+        return self._temporal_analyser.detect_regressions(
+            baseline_id,
+            comparison_ids,
+            threshold_pct=threshold_pct,
+        )
+
+    def find_anomalies(
+        self,
+        profile_id: str,
+        *,
+        cv_threshold: float = 0.5,
+        min_samples: int = 5,
+    ) -> AnomalyReport:
+        """Find functions with unusual timing variance.
+
+        Identifies functions whose execution time varies significantly,
+        indicating unstable performance that may be difficult to predict.
+        High variance can indicate I/O issues, GC pauses, or lock contention.
+
+        Args:
+            profile_id: ID of the profile to analyse.
+            cv_threshold: Minimum coefficient of variation (std_dev / mean)
+                         to flag as anomalous. Default 0.5 (50% variation).
+            min_samples: Minimum samples required for a function to be
+                        included in analysis. Default 5.
+
+        Returns:
+            AnomalyReport with detected anomalies and human-readable summary.
+
+        Example:
+            report = client.find_anomalies(profile_id)
+            for anomaly in report.anomalies:
+                print(f"{anomaly.function}: CV={anomaly.coefficient_of_variation:.2f}")
+            print(report.summary)  # LLM-friendly summary
+        """
+        return self._temporal_analyser.find_anomalies(
+            profile_id,
+            cv_threshold=cv_threshold,
+            min_samples=min_samples,
         )
 
     # =========================================================================
