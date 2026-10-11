@@ -5,6 +5,11 @@ on:
     types: [closed]
     branches: [main]
 
+# Never cancel: this is a one-shot finalise webhook with side effects
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   notify-finalize:
     if: github.event.pull_request.merged == true
