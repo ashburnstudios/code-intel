@@ -5,9 +5,9 @@ on:
     tags:
       - 'v*'
 
-# Ensure only one release at a time
+# Serialise releases per tag; never cancel an in-flight publish
 concurrency:
-  group: release
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
